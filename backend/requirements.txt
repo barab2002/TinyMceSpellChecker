@@ -1,6 +1,6 @@
 fastapi==0.109.2
 uvicorn[standard]==0.27.1
-pyhunspell==0.5.5
+spylls==0.1.7
 python-multipart==0.0.9
 pydantic==2.6.1
 pydantic-settings==2.2.0

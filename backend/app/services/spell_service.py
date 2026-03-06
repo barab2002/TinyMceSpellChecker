@@ -1,42 +1,40 @@
 """
-Spell-check service wrapping Hunspell via pyhunspell.
+Spell-check service — Hebrew support via spylls (pure Python Hunspell).
+
+Why spylls?
+  - Pure Python: `pip install spylls` — no libhunspell-dev system dependency.
+  - Reads standard .aff / .dic files identically to the C Hunspell library.
+  - Works inside Docker AND in local dev without any apt-get step.
+  - Verified working with the he_IL (hspell 1.4) dictionary bundled in this repo.
 
 Hebrew tokenisation notes
 -------------------------
-Hebrew text uses Unicode block U+05D0–U+05EA (letters) plus:
+Hebrew text block: U+05D0–U+05EA (letters) plus:
   - Nikud (vowel points)   U+05B0–U+05C7
   - Cantillation marks     U+0591–U+05AF
-  - Punctuation            U+05BE maqaf (hyphen), U+05F3/U+05F4 geresh/gershayim
+  - Maqaf (hyphen)         U+05BE  — treated as word separator
 
 Strategy:
-  1. Find runs of Hebrew characters (letters + optional nikud).
-  2. Strip nikud before passing to Hunspell — it rarely handles pointed text.
-  3. Skip single-character tokens and tokens shorter than 2 base letters.
-  4. Maqaf-joined words (e.g. בית-ספר) are checked as separate parts.
-  5. Cache per-word results to avoid redundant Hunspell calls on repeated words.
-
-Limitations:
-  - This does not do morphological analysis; compound forms may produce false
-    positives.  The custom dictionary is the recommended mitigation.
-  - Mixed Hebrew-English words are currently skipped.
+  1. Regex-find runs of Hebrew characters (letters + optional nikud).
+  2. Strip nikud before Hunspell — the dictionary uses unpointed forms.
+  3. Skip tokens shorter than 2 base letters.
+  4. Split on maqaf (U+05BE); check each part independently.
+  5. Cache per-word results to avoid redundant calls on repeated words.
 """
 import logging
 import re
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import List, Tuple
 
 from .dictionary_service import DictionaryService
 
 logger = logging.getLogger(__name__)
 
-# Hebrew base letters
-_HE_LETTERS = "\u05D0-\u05EA\u05F0-\u05F4\uFB1D-\uFB4E"
-# Nikud + cantillation (marks only, no letters)
-_HE_MARKS = "\u0591-\u05C7"
-# Full Hebrew token: letters + marks, at least one letter
+_HE_LETTERS  = "\u05D0-\u05EA\u05F0-\u05F4\uFB1D-\uFB4E"
+_HE_MARKS    = "\u0591-\u05C7"
 _HE_TOKEN_RE = re.compile(
     rf"[{_HE_LETTERS}{_HE_MARKS}]*[{_HE_LETTERS}][{_HE_LETTERS}{_HE_MARKS}]*"
 )
-# Maqaf (Hebrew hyphen U+05BE)
 _MAQAF = "\u05BE"
 
 
@@ -45,82 +43,56 @@ def _strip_nikud(word: str) -> str:
     return re.sub(rf"[{_HE_MARKS}]", "", word)
 
 
-def _split_maqaf(word: str) -> List[str]:
-    """Split a word on maqaf, returning each part."""
-    return word.split(_MAQAF)
-
-
 class SpellService:
     def __init__(self, dict_dir: str, language: str = "he_IL") -> None:
         self.language = language
-        self._hunspell = None
-        self._init_hunspell(dict_dir, language)
+        self._dic = None
+        self._init(dict_dir, language)
 
-    # ------------------------------------------------------------------
-    # Initialisation
-    # ------------------------------------------------------------------
-
-    def _init_hunspell(self, dict_dir: str, language: str) -> None:
-        import os
-        from pathlib import Path
-
-        # Support both he-IL and he_IL
+    def _init(self, dict_dir: str, language: str) -> None:
         lang_fs = language.replace("-", "_")
-        base = Path(dict_dir)
+        # spylls.Dictionary.from_files() expects path WITHOUT extension
+        base = Path(dict_dir) / lang_fs
 
-        aff = base / f"{lang_fs}.aff"
-        dic = base / f"{lang_fs}.dic"
-
-        if not aff.exists() or not dic.exists():
+        if not Path(str(base) + ".aff").exists() or not Path(str(base) + ".dic").exists():
             logger.error(
-                "Hunspell dictionary files not found: %s / %s", aff, dic
+                "Dictionary files not found: %s.aff / %s.dic", base, base
             )
             return
 
         try:
-            import hunspell as _hunspell_mod  # pyhunspell
-
-            self._hunspell = _hunspell_mod.HunSpell(str(dic), str(aff))
-            logger.info("Hunspell initialised: language=%s", lang_fs)
-        except ImportError:
-            logger.error(
-                "pyhunspell is not installed. "
-                "Run: pip install pyhunspell (requires libhunspell-dev)"
-            )
+            from spylls.hunspell import Dictionary
+            self._dic = Dictionary.from_files(str(base))
+            logger.info("spylls dictionary loaded: language=%s", lang_fs)
         except Exception as exc:
-            logger.error("Hunspell initialisation failed: %s", exc)
+            logger.error("Failed to load spylls dictionary: %s", exc)
 
     # ------------------------------------------------------------------
-    # Public helpers
+    # Public API
     # ------------------------------------------------------------------
 
     def is_available(self) -> bool:
-        return self._hunspell is not None
+        return self._dic is not None
 
     def check_word(self, word: str) -> bool:
-        """Return True if the word is correctly spelled (or Hunspell unavailable)."""
-        if not self._hunspell:
-            return True  # fail-open: don't block if engine is down
+        """Return True if correctly spelled. Fails open if engine unavailable."""
+        if not self._dic:
+            return True
         clean = _strip_nikud(word)
         if not clean:
             return True
         try:
-            return bool(self._hunspell.spell(clean))
+            return bool(self._dic.lookup(clean))
         except Exception:
             return True
 
     def get_suggestions(self, word: str, max_n: int = 5) -> List[str]:
-        """Return up to max_n spelling suggestions."""
-        if not self._hunspell:
+        """Return up to max_n spelling suggestions (strings, never bytes)."""
+        if not self._dic:
             return []
         clean = _strip_nikud(word)
         try:
-            raw = self._hunspell.suggest(clean)
-            # pyhunspell may return bytes on some builds
-            result: List[str] = []
-            for s in raw[:max_n]:
-                result.append(s.decode("utf-8") if isinstance(s, bytes) else s)
-            return result
+            return list(self._dic.suggest(clean))[:max_n]
         except Exception as exc:
             logger.warning("suggest(%r) failed: %s", word, exc)
             return []
@@ -131,33 +103,32 @@ class SpellService:
 
     def tokenize(self, text: str) -> List[Tuple[str, int, int]]:
         """
-        Extract Hebrew word tokens from *plain* text.
-        Returns list of (token_string, start_offset, end_offset).
-        Tokens spanning maqaf are expanded into their sub-parts with adjusted offsets.
+        Extract Hebrew word tokens from plain text.
+        Returns [(token_str, start_offset, end_offset), ...].
+        Maqaf-joined words (e.g. בית-ספר) are split; each part is yielded
+        separately with its adjusted offset.
         """
         tokens: List[Tuple[str, int, int]] = []
+
         for m in _HE_TOKEN_RE.finditer(text):
-            raw_word = m.group()
+            raw_word  = m.group()
             raw_start = m.start()
 
             if _MAQAF in raw_word:
-                # Split on maqaf and yield each part with its sub-offset
                 cursor = raw_start
                 for part in raw_word.split(_MAQAF):
                     part_end = cursor + len(part)
-                    clean = _strip_nikud(part)
-                    if len(clean) >= 2:
+                    if len(_strip_nikud(part)) >= 2:
                         tokens.append((part, cursor, part_end))
-                    cursor = part_end + 1  # +1 for the maqaf itself
+                    cursor = part_end + 1  # +1 for the maqaf character itself
             else:
-                clean = _strip_nikud(raw_word)
-                if len(clean) >= 2:
+                if len(_strip_nikud(raw_word)) >= 2:
                     tokens.append((raw_word, raw_start, m.end()))
 
         return tokens
 
     # ------------------------------------------------------------------
-    # Main check method
+    # Main entry point
     # ------------------------------------------------------------------
 
     def check_text(
@@ -168,42 +139,36 @@ class SpellService:
         include_suggestions: bool = True,
     ) -> List[dict]:
         """
-        Check *plain* text for Hebrew misspellings.
+        Check plain text for Hebrew misspellings.
 
-        Returns a list of dicts compatible with the Misspelling schema:
-          { word, start, end, suggestions, source }
+        Returns list of dicts: { word, start, end, suggestions, source }
+        where start/end are character offsets in the supplied plain text.
         """
         tokens = self.tokenize(text)
         misspellings: List[dict] = []
-        word_cache: dict = {}  # clean_word -> (is_correct, suggestions)
+        cache: dict = {}  # stripped_word -> (is_correct, [suggestions])
 
         for word, start, end in tokens:
             clean = _strip_nikud(word)
 
-            # 1. Custom / organisational dictionary takes highest priority
+            # Organisational dictionary has highest priority
             if custom_dict.contains(clean):
                 continue
 
-            # 2. Cached result
-            if clean in word_cache:
-                is_correct, suggestions = word_cache[clean]
-            else:
-                is_correct = self.check_word(word)
+            if clean not in cache:
+                is_correct  = self.check_word(word)
                 suggestions = (
                     [] if is_correct
-                    else self.get_suggestions(word, max_suggestions)
-                ) if include_suggestions else []
-                word_cache[clean] = (is_correct, suggestions)
+                    else (self.get_suggestions(word, max_suggestions) if include_suggestions else [])
+                )
+                cache[clean] = (is_correct, suggestions)
+
+            is_correct, suggestions = cache[clean]
 
             if not is_correct:
                 misspellings.append(
-                    {
-                        "word": word,
-                        "start": start,
-                        "end": end,
-                        "suggestions": suggestions,
-                        "source": "hunspell",
-                    }
+                    {"word": word, "start": start, "end": end,
+                     "suggestions": suggestions, "source": "hunspell"}
                 )
 
         return misspellings
