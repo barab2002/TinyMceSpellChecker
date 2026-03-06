@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hebrew Spell-Check — TinyMCE v7 Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: system-ui, Arial, sans-serif;
+      background: #f9fafb;
+      direction: rtl;
+    }
+    h1 { color: #111827; font-size: 22px; margin-bottom: 4px; }
+    p.sub  { color: #6b7280; font-size: 14px; margin-bottom: 24px; }
+    #editor-container { max-width: 900px; }
+    .info-box {
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 6px;
+      padding: 12px 16px;
+      font-size: 13px;
+      color: #1e40af;
+      margin-bottom: 16px;
+      max-width: 900px;
+    }
+    .api-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      margin-bottom: 16px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      background: #f3f4f6;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; }
+    .dot.ok { background: #16a34a; }
+    .dot.err { background: #dc2626; }
+  </style>
+</head>
+<body>
+
+<h1>בדיקת איות עברית — TinyMCE v7</h1>
+<p class="sub">
+  הדגמת פלאגין בדיקת האיות הפנימי. לחץ על כפתור "בדיקת איות" בסרגל הכלים.
+</p>
+
+<div class="info-box">
+  ℹ️ הטקסט לדוגמה מכיל מספר שגיאות כתיב מכוונות:
+  "שלומ" (במקום שלום), "כתיבה" שגויה נוספת, ו-"אורחנוזציה" (במקום ארגון/אורגניזציה).
+  לחץ על מילה מסומנת לראות הצעות תיקון.
+</div>
+
+<div id="api-status-bar" class="api-status">
+  <span class="dot" id="api-dot"></span>
+  <span id="api-status-text">בודק חיבור לשרת...</span>
+</div>
+
+<div id="editor-container">
+  <textarea id="editor">
+שלומ לכולם,
+
+אני כותב מסמך בדיקה עבור מערכת בדיקת האיות הפנימית של הארגון שלנו.
+המסמך הזה מכיל מספר שגיאות כתיבה מכווונות כדי לבדוק את תפקוד המערכת.
+
+כחלק מהאורחנוזציה שלנו אנחנו משתמשים בכלים כמו Salesforce, ZoomInfo ו-Snowflake לניהול לקוחות ונתונים.
+חשוב לוודא שהמילים הללו מוכרות למערכת ואינן מסומנות כשגיאות.
+
+המחלקה שלנו עוסקת בניהול מכירות, שיווק ופיתוח עסקי.
+אנחנו מאמינים שכלים טכנולוגים מתקדמים עוזרים לנו להצליח.
+
+בברכה,
+הצוות
+  </textarea>
+</div>
+
+<!--
+  TinyMCE v7 — load from CDN or self-hosted copy.
+  For internal/offline use, host TinyMCE locally:
+    <script src="/tinymce/tinymce.min.js"></script>
+-->
+<script src="https://cdn.jsdelivr.net/npm/tinymce@7/tinymce.min.js" referrerpolicy="origin"></script>
+
+<!-- Hebrew Spell-Check Plugin -->
+<script src="/plugin/hebrewspellcheck/plugin.js"></script>
+
+<script>
+  // ─── TinyMCE initialization ────────────────────────────────────────────────
+  tinymce.init({
+    selector: '#editor',
+
+    // ── Plugin loading ───────────────────────────────────────────────────────
+    plugins: [
+      'lists', 'link', 'image', 'table', 'code',
+    ],
+    // Load our plugin as an external plugin
+    // In production, use an absolute URL or a path relative to your web root
+    external_plugins: {
+      hebrewspellcheck: '/plugin/hebrewspellcheck/plugin.js',
+    },
+
+    // ── Toolbar ──────────────────────────────────────────────────────────────
+    toolbar: [
+      'hebrewspellcheck hebrewspellcheck_clear | ' +
+      'undo redo | blocks | bold italic underline | ' +
+      'alignright aligncenter alignleft | ' +
+      'bullist numlist | link | code'
+    ],
+
+    // ── Menus ────────────────────────────────────────────────────────────────
+    menu: {
+      tools: {
+        title: 'כלים',
+        items: 'hebrewspellcheck hebrewspellcheck_clear',
+      },
+    },
+
+    // ── RTL / Hebrew layout ──────────────────────────────────────────────────
+    directionality: 'rtl',
+    language: 'he_IL',            // requires TinyMCE Hebrew language pack
+
+    // ── Spell-check plugin configuration ────────────────────────────────────
+    hebrewspellcheck_api_url: 'http://localhost:8000',   // backend URL
+    hebrewspellcheck_language: 'he-IL',
+    hebrewspellcheck_max_suggestions: 5,
+
+    // ── Content security ─────────────────────────────────────────────────────
+    // Allow our spell-check spans through the content filter
+    extended_valid_elements: 'span[class|data-word|data-suggestions]',
+
+    // ── Editor appearance ────────────────────────────────────────────────────
+    height: 480,
+    resize: true,
+    content_css: false,
+    content_style: `
+      body {
+        font-family: Arial, "David", "Frank Ruehl", sans-serif;
+        font-size: 15px;
+        line-height: 1.7;
+        direction: rtl;
+        text-align: right;
+        color: #111827;
+        padding: 16px;
+        max-width: 860px;
+        margin: 0 auto;
+      }
+    `,
+
+    // ── Browser spell-check disabled (we handle it ourselves) ────────────────
+    browser_spellcheck: false,
+    gecko_spellcheck: false,
+  });
+
+  // ─── API health check on page load ────────────────────────────────────────
+  (async function checkApiHealth() {
+    const dot  = document.getElementById('api-dot');
+    const text = document.getElementById('api-status-text');
+    try {
+      const res = await fetch('http://localhost:8000/health', { signal: AbortSignal.timeout(4000) });
+      if (res.ok) {
+        const data = await res.json();
+        dot.className = 'dot ok';
+        text.textContent =
+          `שרת בדיקת האיות פעיל | Hunspell: ${data.hunspell_available ? 'זמין' : 'לא זמין'} | מילים מותאמות: ${data.custom_dict_words}`;
+      } else {
+        throw new Error(`HTTP ${res.status}`);
+      }
+    } catch (e) {
+      dot.className = 'dot err';
+      text.textContent = 'שרת בדיקת האיות אינו זמין — הפעל את הבאקנד תחילה';
+    }
+  })();
+</script>
+
+</body>
+</html>

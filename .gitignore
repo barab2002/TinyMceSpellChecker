@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+.eggs/
+
+# Env files (never commit real .env)
+.env
+!.env.example
+
+# Logs
+*.log
+backend/logs/*.json
+
+# Dictionary binary caches (Hunspell generates these at runtime)
+*.dic.bgof
+*.aff.bgof
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

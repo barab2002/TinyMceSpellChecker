@@ -1,0 +1,78 @@
+{
+  "description": "Sample Hebrew test data with intentional spelling mistakes",
+  "language": "he-IL",
+  "test_cases": [
+    {
+      "name": "basic_misspelling",
+      "description": "Simple single-word misspelling",
+      "input": "שלומ",
+      "expected_misspelling": "שלומ",
+      "expected_correction": "שלום"
+    },
+    {
+      "name": "paragraph_with_errors",
+      "description": "Realistic paragraph with multiple intentional mistakes",
+      "input": "שלומ לכולם. אנחנו עוסקים בפיתוח תוכנה ובניהול אורחנוזציה גדולה. הכתיבה שלנו חשובה מאוד להצלחה של כל פרוייקט.",
+      "errors": [
+        {"word": "שלומ",       "correction": "שלום"},
+        {"word": "אורחנוזציה", "correction": "ארגון / אורגניזציה"},
+        {"word": "פרוייקט",    "correction": "פרויקט"}
+      ]
+    },
+    {
+      "name": "org_words_whitelist",
+      "description": "Words in the org dictionary should NOT be flagged",
+      "input": "אנחנו משתמשים ב-Salesforce, ZoomInfo ו-Snowflake.",
+      "expected_misspellings": []
+    },
+    {
+      "name": "mixed_content",
+      "description": "Mixed Hebrew and English text",
+      "input": "מערכת ה-CRM שלנו מבוססת על Salesforce ומשולבת עם ZoomInfo לניהול לידים.",
+      "expected_misspellings": []
+    },
+    {
+      "name": "nikud_handling",
+      "description": "Hebrew text with nikud (vowel points) should be handled gracefully",
+      "input": "בְּרֵאשִׁית בָּרָא אֱלֹהִים אֵת הַשָּׁמַיִם וְאֵת הָאָרֶץ",
+      "expected_misspellings": []
+    },
+    {
+      "name": "maqaf_words",
+      "description": "Hebrew words joined by maqaf (U+05BE) hyphen",
+      "input": "בית-ספר, בן-אדם, על-פי",
+      "expected_misspellings": []
+    }
+  ],
+  "sample_api_request": {
+    "url": "POST http://localhost:8000/spell/check",
+    "body": {
+      "text": "שלומ לכולם, אנחנו כותבים מסמך חשוב מאוד. האורחנוזציה שלנו משתמשת ב-Salesforce.",
+      "language": "he-IL",
+      "options": {
+        "includeSuggestions": true,
+        "maxSuggestions": 5
+      }
+    },
+    "expected_response_shape": {
+      "language": "he-IL",
+      "misspellings": [
+        {
+          "word": "שלומ",
+          "start": 0,
+          "end": 4,
+          "suggestions": ["שלום", "שלמו"],
+          "source": "hunspell"
+        },
+        {
+          "word": "אורחנוזציה",
+          "start": 42,
+          "end": 52,
+          "suggestions": [],
+          "source": "hunspell"
+        }
+      ],
+      "total": 2
+    }
+  }
+}
