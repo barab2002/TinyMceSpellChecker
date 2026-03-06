@@ -83,7 +83,7 @@
 
 <div class="page-header">
   <h1>בדיקת איות עברית — TinyMCE v7</h1>
-  <p>הדגמה של פלאגין בדיקת האיות הפנימי. לחץ על <strong>"בדיקת איות"</strong> בסרגל הכלים.</p>
+  <p>הדגמה של פלאגין בדיקת האיות. השתמש בכפתורים בסרגל: <strong>בדיקת איות</strong> (ידנית), <strong>בדיקה אוטומטית</strong> (תוך כדי הקלדה), <strong>מילון הארגון</strong> (ניהול מילים מותאמות).</p>
 </div>
 
 <!-- Backend URL config — change this if your API is on a different host/port -->
@@ -192,7 +192,7 @@
 
     // ── Toolbar: spell-check buttons first, then standard editing tools ──
     toolbar: [
-      'hebrewspellcheck hebrewspellcheck_clear | ' +
+      'hebrewspellcheck hebrewspellcheck_clear hebrewspellcheck_toggle_auto hebrewspellcheck_dictionary | ' +
       'undo redo | blocks | ' +
       'bold italic underline | ' +
       'alignright aligncenter alignleft | ' +
@@ -203,7 +203,7 @@
     menu: {
       tools: {
         title: 'כלים',
-        items: 'hebrewspellcheck hebrewspellcheck_clear',
+        items: 'hebrewspellcheck hebrewspellcheck_clear hebrewspellcheck_dictionary',
       },
     },
 
@@ -211,6 +211,7 @@
     hebrewspellcheck_api_url:         getApiUrl(),
     hebrewspellcheck_language:        'he-IL',
     hebrewspellcheck_max_suggestions: 5,
+    hebrewspellcheck_auto_check:      false,   // set true to enable auto-check on load
 
     // ── Allow spell-check spans through TinyMCE's content sanitiser ──
     extended_valid_elements: 'span[class|data-word|data-suggestions]',

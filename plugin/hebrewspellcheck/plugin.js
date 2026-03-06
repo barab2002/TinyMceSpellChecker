@@ -11,7 +11,7 @@
  *     external_plugins: {
  *       hebrewspellcheck: '/plugin/hebrewspellcheck/plugin.js',
  *     },
- *     toolbar: 'hebrewspellcheck hebrewspellcheck_clear | bold italic ...',
+ *     toolbar: 'hebrewspellcheck hebrewspellcheck_clear hebrewspellcheck_toggle_auto hebrewspellcheck_dictionary | bold italic ...',
  *     extended_valid_elements: 'span[class|data-word|data-suggestions]',
  *     browser_spellcheck: false,
  *
@@ -19,23 +19,15 @@
  *     hebrewspellcheck_api_url:         'http://localhost:8000',
  *     hebrewspellcheck_language:        'he-IL',
  *     hebrewspellcheck_max_suggestions: 5,
+ *     hebrewspellcheck_auto_check:      false,   // auto-check while typing
  *   });
  *
- * Architecture
+ * Toolbar buttons available:
  * ─────────────────────────────────────────────────────────────
- *  1. "בדיקת איות" button clicked.
- *  2. Walk editor DOM text nodes → build plain-text corpus + segment map.
- *  3. POST /spell/check with plain text.
- *  4. Map returned offsets back to DOM text nodes.
- *  5. Wrap misspelled runs in <span class="mce-spellcheck-word">.
- *  6. Click on span → show suggestion popover (createElement only, no innerHTML).
- *
- * Safety
- * ─────────────────────────────────────────────────────────────
- *  • Only TEXT_NODE nodes are ever touched — hrefs, src, data-* untouched.
- *  • All DOM creation uses ownerDocument (correct in iframe mode).
- *  • Popover built with createElement/textContent — XSS impossible.
- *  • All DOM mutations inside editor.undoManager.transact() (single undo step).
+ *  • hebrewspellcheck          — run spell-check manually
+ *  • hebrewspellcheck_clear    — remove all highlights
+ *  • hebrewspellcheck_toggle_auto — toggle auto-check while typing
+ *  • hebrewspellcheck_dictionary  — open org-dictionary manager
  */
 
 /* global tinymce */
@@ -49,6 +41,7 @@
   const SPAN_ACTIVE_CLS = 'mce-spellcheck-word--active';
   const POPOVER_ID      = 'mce-spellcheck-popover';
   const STYLE_ID        = 'mce-spellcheck-styles';
+  const AUTO_CHECK_DEBOUNCE_MS = 1500;
 
   // ─── CSS injected into editor content document ─────────────────────────────
 
@@ -84,13 +77,13 @@
           language: this._language,
           options: { includeSuggestions: true, maxSuggestions },
         }),
-        signal: AbortSignal.timeout(15000),  // 15 s timeout
+        signal: AbortSignal.timeout(15000),
       });
       if (!res.ok) {
         const body = await res.text().catch(() => '');
         throw new Error(`Spell-check API error ${res.status}: ${body}`);
       }
-      return res.json(); // { language, misspellings: [...], total }
+      return res.json();
     },
 
     async addToDictionary(word) {
@@ -106,22 +99,35 @@
       }
       return res.json();
     },
+
+    async removeFromDictionary(word) {
+      const res = await fetch(`${this._baseUrl}/dictionary/remove`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ word }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Dictionary API error ${res.status}: ${body}`);
+      }
+      return res.json();
+    },
+
+    async listWords() {
+      const res = await fetch(`${this._baseUrl}/dictionary`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Dictionary API error ${res.status}: ${body}`);
+      }
+      return res.json(); // { words: [...], count: N }
+    },
   };
 
   // ─── Text extraction ───────────────────────────────────────────────────────
 
-  /**
-   * Walk the editor body and collect all TEXT_NODE content.
-   *
-   * Returns { plainText: string, segments: Array<Segment> } where each
-   * Segment is:
-   *   { node: Text, start: number, end: number, wrapped: boolean }
-   *
-   * A space is inserted between block-level siblings so that
-   * "wordA</p><p>wordB" becomes "wordA wordB" in plainText.
-   *
-   * @param {Element} editorBody - editor.getBody()
-   */
   function extractTextSegments(editorBody) {
     const BLOCK_TAGS = new Set([
       'P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
@@ -129,7 +135,6 @@
       'ARTICLE', 'SECTION', 'HEADER', 'FOOTER', 'FIGCAPTION', 'CAPTION',
     ]);
 
-    // Use the editor's own document for the TreeWalker (correct in iframe mode)
     const editorDoc = editorBody.ownerDocument;
     const walker    = editorDoc.createTreeWalker(
       editorBody,
@@ -148,13 +153,11 @@
         continue;
       }
 
-      // TEXT_NODE
       const text = node.textContent;
       if (!text) continue;
 
       const parentEl = node.parentElement;
 
-      // Insert space at block boundary so words don't merge across paragraphs
       if (prevWasBlock && plainText) {
         plainText  += ' ';
         prevWasBlock = false;
@@ -162,7 +165,6 @@
 
       const start   = plainText.length;
       const end     = start + text.length;
-      // "wrapped" means this node is already inside a spell-check span
       const wrapped = !!(parentEl && parentEl.classList.contains(SPAN_CLASS));
 
       segments.push({ node, start, end, wrapped });
@@ -174,10 +176,6 @@
 
   // ─── Highlighting ──────────────────────────────────────────────────────────
 
-  /**
-   * Remove all spell-check spans from the editor body, restoring plain text.
-   * Call this before every spell-check run (idempotent).
-   */
   function clearHighlights(editorBody) {
     editorBody.querySelectorAll(`.${SPAN_CLASS}`).forEach((span) => {
       const parent = span.parentNode;
@@ -188,21 +186,8 @@
     });
   }
 
-  /**
-   * Wrap a sub-range of a text node in a spell-check span.
-   *
-   * IMPORTANT: uses textNode.ownerDocument.createElement so this works
-   * correctly inside TinyMCE's iframe (different document from host page).
-   *
-   * @param {Text}     textNode
-   * @param {number}   localStart - start within textNode.textContent
-   * @param {number}   localEnd   - end   within textNode.textContent
-   * @param {string}   word
-   * @param {string[]} suggestions
-   * @returns {HTMLSpanElement}
-   */
   function wrapTextNodeRange(textNode, localStart, localEnd, word, suggestions) {
-    const doc    = textNode.ownerDocument; // ← use the correct (iframe) document
+    const doc    = textNode.ownerDocument;
     const text   = textNode.textContent;
     const before = text.slice(0, localStart);
     const middle = text.slice(localStart, localEnd);
@@ -228,37 +213,27 @@
     return span;
   }
 
-  /**
-   * Map API misspelling offsets back to DOM text nodes and wrap them.
-   *
-   * Processes in reverse offset order so earlier wraps don't shift later offsets.
-   */
   function applyHighlights(segments, misspellings) {
     const sorted = [...misspellings].sort((a, b) => b.start - a.start);
 
     for (const miss of sorted) {
       const { word, start: mStart, end: mEnd, suggestions } = miss;
 
-      // Find the one segment that fully contains this misspelling range
       const seg = segments.find(
         (s) => !s.wrapped && s.start <= mStart && s.end >= mEnd
       );
-      if (!seg) continue; // spans a node boundary or already wrapped — skip safely
+      if (!seg) continue;
 
       const localStart = mStart - seg.start;
       const localEnd   = mEnd   - seg.start;
 
-      // Sanity check: does the node actually contain the expected text?
-      const nodeText = seg.node.textContent;
-      const slice    = nodeText.slice(localStart, localEnd);
-      // Allow nikud-stripped matches (API strips nikud, DOM may have it)
+      const nodeText   = seg.node.textContent;
+      const slice      = nodeText.slice(localStart, localEnd);
       const sliceClean = slice.replace(/[\u0591-\u05C7]/g, '');
       if (slice !== word && sliceClean !== word) continue;
 
       wrapTextNodeRange(seg.node, localStart, localEnd, word, suggestions || []);
 
-      // After wrapping, seg.node holds only the suffix text (or was removed).
-      // Advance seg.start so lower-offset segments still resolve correctly.
       const suffixLen = nodeText.length - localEnd;
       seg.start = suffixLen > 0 ? mEnd : seg.end;
     }
@@ -266,12 +241,6 @@
 
   // ─── Suggestion popover ────────────────────────────────────────────────────
 
-  /**
-   * Floating suggestion popover rendered in the HOST document so it can
-   * overflow the editor iframe boundaries.
-   *
-   * Built 100% with createElement/textContent — no innerHTML anywhere.
-   */
   const Popover = {
     _el:          null,
     _currentSpan: null,
@@ -299,20 +268,14 @@
       document.body.appendChild(el);
       this._el = el;
 
-      // Close when clicking anywhere outside the popover
       document.addEventListener('mousedown', (e) => {
         if (this._el && !this._el.contains(e.target)) this.hide();
       }, true);
     },
 
-    /**
-     * @param {HTMLSpanElement} span       - the clicked spell-check span
-     * @param {object}          editor     - TinyMCE editor instance
-     * @param {Function}        onReplace  - called after a word is replaced
-     */
     show(span, editor, onReplace) {
       this._build();
-      this.hide(); // close any existing popover first
+      this.hide();
 
       this._currentSpan = span;
       span.classList.add(SPAN_ACTIVE_CLS);
@@ -322,10 +285,9 @@
       try { suggestions = JSON.parse(span.dataset.suggestions || '[]'); } catch (_) {}
 
       const el = this._el;
-      // Clear previous content (safe: will be rebuilt below with createElement)
       while (el.firstChild) el.removeChild(el.firstChild);
 
-      // ── Header: the misspelled word ──
+      // Header
       const header = document.createElement('div');
       Object.assign(header.style, {
         padding:      '7px 14px 5px',
@@ -338,7 +300,6 @@
       header.textContent = `⚠ ${word}`;
       el.appendChild(header);
 
-      // Helper: add a clickable row
       const addRow = (label, onClick) => {
         const row = document.createElement('div');
         Object.assign(row.style, {
@@ -353,13 +314,12 @@
         row.textContent = label;
         row.addEventListener('mouseover', () => (row.style.background = '#f9fafb'));
         row.addEventListener('mouseout',  () => (row.style.background = ''));
-        // mousedown (not click) so focus doesn't leave the editor before action
         row.addEventListener('mousedown', (e) => { e.preventDefault(); onClick(); });
         el.appendChild(row);
         return row;
       };
 
-      // ── Suggestions ──
+      // Suggestions
       if (suggestions.length > 0) {
         const label = document.createElement('div');
         Object.assign(label.style, {
@@ -385,12 +345,12 @@
         el.appendChild(none);
       }
 
-      // ── Divider ──
+      // Divider
       const hr = document.createElement('div');
       Object.assign(hr.style, { margin: '5px 0', borderTop: '1px solid #f3f4f6' });
       el.appendChild(hr);
 
-      // ── Actions ──
+      // Actions
       addRow('התעלם', () => { this._ignore(span); this.hide(); });
 
       addRow('הוסף למילון', async () => {
@@ -404,14 +364,9 @@
         }
       });
 
-      // ── Position ──
       this._position(span, editor);
     },
 
-    /**
-     * Position the popover below the span, staying within the viewport.
-     * Works for both iframe mode and inline mode.
-     */
     _position(span, editor) {
       const el = this._el;
       el.style.display = 'block';
@@ -419,9 +374,6 @@
       const vw = window.innerWidth;
       const vh = window.innerHeight;
 
-      // The span lives inside the editor which may be an iframe.
-      // span.getBoundingClientRect() returns coords relative to the
-      // iframe's viewport. We need host-document viewport coords.
       const container = editor.getContainer && editor.getContainer();
       const iframeEl  = container ? container.querySelector('iframe') : null;
       const iframeOff = iframeEl
@@ -430,7 +382,6 @@
 
       const spanRect = span.getBoundingClientRect();
 
-      // Convert iframe-relative → host-document-relative
       const spanLeft   = iframeOff.left + spanRect.left;
       const spanBottom = iframeOff.top  + spanRect.bottom;
       const spanTop    = iframeOff.top  + spanRect.top;
@@ -441,9 +392,7 @@
       let left = spanLeft;
       let top  = spanBottom + 6;
 
-      // Flip above if below-fold
       if (top + popH > vh - 8) top = spanTop - popH - 6;
-      // Clamp horizontal
       if (left + popW > vw - 8) left = vw - popW - 8;
       if (left < 8) left = 8;
 
@@ -460,7 +409,6 @@
     },
 
     _replace(span, replacement, editor) {
-      // ownerDocument ensures we create the text node in the correct document
       const textNode = span.ownerDocument.createTextNode(replacement);
       editor.undoManager.transact(() => {
         span.parentNode.replaceChild(textNode, span);
@@ -485,6 +433,290 @@
     },
   };
 
+  // ─── Organisation Dictionary Manager ──────────────────────────────────────
+
+  const DictionaryManager = {
+    _overlay:  null,
+    _listEl:   null,
+    _addInput: null,
+
+    _build() {
+      if (this._overlay) return;
+
+      // Backdrop
+      const overlay = document.createElement('div');
+      Object.assign(overlay.style, {
+        position:   'fixed',
+        inset:      '0',
+        background: 'rgba(0,0,0,0.45)',
+        zIndex:     '2147483646',
+        display:    'none',
+      });
+      overlay.addEventListener('mousedown', (e) => {
+        if (e.target === overlay) this.hide();
+      });
+      document.body.appendChild(overlay);
+      this._overlay = overlay;
+
+      // Dialog panel
+      const el = document.createElement('div');
+      Object.assign(el.style, {
+        position:      'fixed',
+        top:           '50%',
+        left:          '50%',
+        transform:     'translate(-50%, -50%)',
+        background:    '#ffffff',
+        border:        '1px solid #d1d5db',
+        borderRadius:  '10px',
+        boxShadow:     '0 8px 32px rgba(0,0,0,0.22)',
+        width:         '440px',
+        maxWidth:      '95vw',
+        maxHeight:     '80vh',
+        display:       'flex',
+        flexDirection: 'column',
+        fontFamily:    'system-ui, -apple-system, Arial, sans-serif',
+        direction:     'rtl',
+        zIndex:        '2147483647',
+        fontSize:      '13px',
+      });
+      overlay.appendChild(el);
+
+      // ── Header ──
+      const header = document.createElement('div');
+      Object.assign(header.style, {
+        display:        'flex',
+        alignItems:     'center',
+        justifyContent: 'space-between',
+        padding:        '14px 16px',
+        borderBottom:   '1px solid #e5e7eb',
+        fontWeight:     '700',
+        fontSize:       '15px',
+        flexShrink:     '0',
+      });
+      const titleEl = document.createElement('span');
+      titleEl.textContent = 'ניהול מילון הארגון';
+      const closeBtn = document.createElement('button');
+      closeBtn.textContent = '×';
+      Object.assign(closeBtn.style, {
+        background: 'none',
+        border:     'none',
+        fontSize:   '22px',
+        lineHeight: '1',
+        cursor:     'pointer',
+        color:      '#6b7280',
+        padding:    '0 2px',
+      });
+      closeBtn.addEventListener('click', () => this.hide());
+      header.appendChild(titleEl);
+      header.appendChild(closeBtn);
+      el.appendChild(header);
+
+      // ── Add-word section ──
+      const addSection = document.createElement('div');
+      Object.assign(addSection.style, {
+        display:      'flex',
+        gap:          '8px',
+        padding:      '12px 16px',
+        borderBottom: '1px solid #e5e7eb',
+        flexShrink:   '0',
+      });
+      const input = document.createElement('input');
+      input.type        = 'text';
+      input.placeholder = 'הוסף מילה חדשה...';
+      Object.assign(input.style, {
+        flex:         '1',
+        padding:      '7px 10px',
+        border:       '1px solid #d1d5db',
+        borderRadius: '5px',
+        fontSize:     '13px',
+        direction:    'rtl',
+        outline:      'none',
+      });
+      input.addEventListener('focus', () => (input.style.borderColor = '#2563eb'));
+      input.addEventListener('blur',  () => (input.style.borderColor = '#d1d5db'));
+      this._addInput = input;
+
+      const addBtn = document.createElement('button');
+      addBtn.textContent = 'הוסף';
+      Object.assign(addBtn.style, {
+        padding:      '7px 16px',
+        background:   '#2563eb',
+        color:        '#fff',
+        border:       'none',
+        borderRadius: '5px',
+        cursor:       'pointer',
+        fontSize:     '13px',
+        fontWeight:   '600',
+        flexShrink:   '0',
+      });
+      addBtn.addEventListener('mouseover', () => (addBtn.style.background = '#1d4ed8'));
+      addBtn.addEventListener('mouseout',  () => (addBtn.style.background = '#2563eb'));
+      addBtn.addEventListener('click', () => this._addWord());
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') this._addWord(); });
+
+      addSection.appendChild(input);
+      addSection.appendChild(addBtn);
+      el.appendChild(addSection);
+
+      // ── Word list ──
+      const listContainer = document.createElement('div');
+      Object.assign(listContainer.style, {
+        overflowY:  'auto',
+        flex:       '1',
+        minHeight:  '120px',
+      });
+      this._listEl = listContainer;
+      el.appendChild(listContainer);
+
+      // ── Footer ──
+      const footer = document.createElement('div');
+      Object.assign(footer.style, {
+        padding:        '10px 16px',
+        borderTop:      '1px solid #e5e7eb',
+        display:        'flex',
+        justifyContent: 'flex-end',
+        flexShrink:     '0',
+      });
+      const closeFooterBtn = document.createElement('button');
+      closeFooterBtn.textContent = 'סגור';
+      Object.assign(closeFooterBtn.style, {
+        padding:      '7px 22px',
+        background:   '#f3f4f6',
+        color:        '#374151',
+        border:       '1px solid #d1d5db',
+        borderRadius: '5px',
+        cursor:       'pointer',
+        fontSize:     '13px',
+      });
+      closeFooterBtn.addEventListener('click', () => this.hide());
+      footer.appendChild(closeFooterBtn);
+      el.appendChild(footer);
+    },
+
+    async open() {
+      this._build();
+      this._overlay.style.display = 'block';
+      this._addInput.value = '';
+      this._addInput.focus();
+      await this._refresh();
+    },
+
+    hide() {
+      if (this._overlay) this._overlay.style.display = 'none';
+    },
+
+    async _refresh() {
+      const listEl = this._listEl;
+      while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+
+      // Loading state
+      const loading = document.createElement('div');
+      Object.assign(loading.style, { padding: '24px', textAlign: 'center', color: '#9ca3af' });
+      loading.textContent = 'טוען...';
+      listEl.appendChild(loading);
+
+      try {
+        const data  = await Api.listWords();
+        const words = data.words || [];
+        while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+
+        if (words.length === 0) {
+          const empty = document.createElement('div');
+          Object.assign(empty.style, {
+            padding:   '32px 16px',
+            textAlign: 'center',
+            color:     '#9ca3af',
+          });
+          empty.textContent = 'המילון הארגוני ריק — הוסף מילים למעלה';
+          listEl.appendChild(empty);
+          return;
+        }
+
+        // Count label
+        const countLabel = document.createElement('div');
+        Object.assign(countLabel.style, {
+          padding:    '8px 16px 4px',
+          fontSize:   '11px',
+          color:      '#6b7280',
+          fontWeight: '500',
+        });
+        countLabel.textContent = `${words.length} מילים במילון`;
+        listEl.appendChild(countLabel);
+
+        words.forEach((word) => {
+          const row = document.createElement('div');
+          Object.assign(row.style, {
+            display:        'flex',
+            alignItems:     'center',
+            justifyContent: 'space-between',
+            padding:        '8px 16px',
+            borderBottom:   '1px solid #f3f4f6',
+          });
+          row.addEventListener('mouseover', () => (row.style.background = '#f9fafb'));
+          row.addEventListener('mouseout',  () => (row.style.background = ''));
+
+          const wordText = document.createElement('span');
+          wordText.textContent = word;
+          Object.assign(wordText.style, { color: '#111827' });
+
+          const delBtn = document.createElement('button');
+          delBtn.textContent = 'מחק';
+          Object.assign(delBtn.style, {
+            padding:      '3px 10px',
+            background:   '#fee2e2',
+            color:        '#dc2626',
+            border:       'none',
+            borderRadius: '4px',
+            cursor:       'pointer',
+            fontSize:     '12px',
+            fontWeight:   '500',
+          });
+          delBtn.addEventListener('mouseover', () => (delBtn.style.background = '#fecaca'));
+          delBtn.addEventListener('mouseout',  () => (delBtn.style.background = '#fee2e2'));
+          delBtn.addEventListener('click', () => this._removeWord(word));
+
+          row.appendChild(wordText);
+          row.appendChild(delBtn);
+          listEl.appendChild(row);
+        });
+
+      } catch (_err) {
+        while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+        const errEl = document.createElement('div');
+        Object.assign(errEl.style, {
+          padding:   '24px 16px',
+          textAlign: 'center',
+          color:     '#dc2626',
+        });
+        errEl.textContent = 'שגיאה בטעינת המילון — בדוק שהשרת פועל';
+        listEl.appendChild(errEl);
+      }
+    },
+
+    async _addWord() {
+      const word = this._addInput.value.trim();
+      if (!word) return;
+      try {
+        await Api.addToDictionary(word);
+        this._addInput.value = '';
+        await this._refresh();
+        Notifier.show(`"${word}" נוספה למילון ✓`, 'success');
+      } catch (_err) {
+        Notifier.show('שגיאה בהוספת המילה — בדוק שהשרת פועל', 'error');
+      }
+    },
+
+    async _removeWord(word) {
+      try {
+        await Api.removeFromDictionary(word);
+        await this._refresh();
+        Notifier.show(`"${word}" הוסרה מהמילון`, 'info');
+      } catch (_err) {
+        Notifier.show('שגיאה בהסרת המילה', 'error');
+      }
+    },
+  };
+
   // ─── Toast notifications ───────────────────────────────────────────────────
 
   const Notifier = {
@@ -492,20 +724,20 @@
       const BG = { success: '#16a34a', error: '#dc2626', info: '#2563eb' };
       const el  = document.createElement('div');
       Object.assign(el.style, {
-        position:     'fixed',
-        bottom:       '24px',
-        right:        '24px',
-        background:   BG[type] || BG.info,
-        color:        '#fff',
-        padding:      '10px 18px',
-        borderRadius: '6px',
-        fontFamily:   'system-ui, Arial, sans-serif',
-        fontSize:     '13px',
-        fontWeight:   '500',
-        zIndex:       '2147483647',
-        boxShadow:    '0 4px 12px rgba(0,0,0,0.2)',
-        direction:    'rtl',
-        maxWidth:     '340px',
+        position:      'fixed',
+        bottom:        '24px',
+        right:         '24px',
+        background:    BG[type] || BG.info,
+        color:         '#fff',
+        padding:       '10px 18px',
+        borderRadius:  '6px',
+        fontFamily:    'system-ui, Arial, sans-serif',
+        fontSize:      '13px',
+        fontWeight:    '500',
+        zIndex:        '2147483647',
+        boxShadow:     '0 4px 12px rgba(0,0,0,0.2)',
+        direction:     'rtl',
+        maxWidth:      '340px',
         pointerEvents: 'none',
       });
       el.textContent = message;
@@ -518,7 +750,7 @@
 
   tinymce.PluginManager.add(PLUGIN_NAME, function (editor) {
 
-    // ── STEP 1: Register options FIRST (required by TinyMCE v7 before any get()) ──
+    // ── STEP 1: Register all options before any get() ──
     editor.options.register('hebrewspellcheck_api_url', {
       processor: 'string',
       default:   'http://localhost:8000',
@@ -531,11 +763,16 @@
       processor: 'number',
       default:   5,
     });
+    editor.options.register('hebrewspellcheck_auto_check', {
+      processor: 'boolean',
+      default:   false,
+    });
 
-    // ── STEP 2: Read options (safe now that they're registered) ──
+    // ── STEP 2: Read options ──
     const apiUrl   = editor.options.get('hebrewspellcheck_api_url');
     const language = editor.options.get('hebrewspellcheck_language');
     const maxSug   = editor.options.get('hebrewspellcheck_max_suggestions');
+    let   autoCheckEnabled = editor.options.get('hebrewspellcheck_auto_check');
 
     Api.init(apiUrl, language);
 
@@ -556,7 +793,7 @@
       if (target && target.classList && target.classList.contains(SPAN_CLASS)) {
         e.preventDefault();
         e.stopPropagation();
-        Popover.show(target, editor, () => runSpellCheck(false));
+        Popover.show(target, editor, () => runSpellCheck(false, true));
       } else {
         Popover.hide();
       }
@@ -565,21 +802,28 @@
     // ── Close popover when editor loses focus ──
     editor.on('blur', () => Popover.hide());
 
+    // ── Auto spell-check while typing (debounced) ──
+    let autoCheckTimer = null;
+    editor.on('input', () => {
+      if (!autoCheckEnabled) return;
+      clearTimeout(autoCheckTimer);
+      autoCheckTimer = setTimeout(() => runSpellCheck(false, true), AUTO_CHECK_DEBOUNCE_MS);
+    });
+
     // ── Core: run the spell check ──
-    async function runSpellCheck(showProgress = true) {
+    // silent=true suppresses "found N errors" toasts (used for auto-check)
+    async function runSpellCheck(showProgress = true, silent = false) {
       Popover.hide();
 
       const body = editor.getBody();
       if (!body) return;
 
-      // Clear existing highlights first
       editor.undoManager.transact(() => clearHighlights(body));
 
-      // Extract plain text + segment map AFTER clearing highlights
       const { plainText, segments } = extractTextSegments(body);
 
       if (!plainText.trim()) {
-        Notifier.show('אין תוכן לבדיקת איות', 'info');
+        if (!silent) Notifier.show('אין תוכן לבדיקת איות', 'info');
         return;
       }
 
@@ -592,27 +836,32 @@
           applyHighlights(segments, result.misspellings || []);
         });
 
-        const count = result.total || 0;
-        if (count === 0) {
-          Notifier.show('לא נמצאו שגיאות איות ✓', 'success');
-        } else {
-          Notifier.show(
-            `נמצאו ${count} שגיאות איות — לחץ על מילה מסומנת לתיקון`,
-            'info'
-          );
+        if (!silent) {
+          const count = result.total || 0;
+          if (count === 0) {
+            Notifier.show('לא נמצאו שגיאות איות ✓', 'success');
+          } else {
+            Notifier.show(
+              `נמצאו ${count} שגיאות איות — לחץ על מילה מסומנת לתיקון`,
+              'info'
+            );
+          }
         }
       } catch (err) {
-        console.error('[HebrewSpellCheck]', err);
-        const msg = err.name === 'TimeoutError'
-          ? 'שרת בדיקת האיות לא הגיב בזמן — אנא נסה שוב'
-          : 'שגיאה בחיבור לשרת בדיקת האיות — בדוק שהשרת פועל';
-        Notifier.show(msg, 'error');
+        if (!silent) {
+          console.error('[HebrewSpellCheck]', err);
+          const msg = err.name === 'TimeoutError'
+            ? 'שרת בדיקת האיות לא הגיב בזמן — אנא נסה שוב'
+            : 'שגיאה בחיבור לשרת בדיקת האיות — בדוק שהשרת פועל';
+          Notifier.show(msg, 'error');
+        }
       } finally {
         if (showProgress) editor.setProgressState(false);
       }
     }
 
     function clearAllHighlights() {
+      clearTimeout(autoCheckTimer);
       Popover.hide();
       editor.undoManager.transact(() => clearHighlights(editor.getBody()));
       Notifier.show('סימוני האיות נוקו', 'info');
@@ -632,6 +881,32 @@
       onAction: clearAllHighlights,
     });
 
+    // Toggle button — stays "pressed" while auto-check is active
+    editor.ui.registry.addToggleButton('hebrewspellcheck_toggle_auto', {
+      text:    'בדיקה אוטומטית',
+      tooltip: 'הפעל/כבה בדיקת איות אוטומטית תוך כדי הקלדה',
+      onSetup: (api) => {
+        api.setActive(autoCheckEnabled);
+        return () => {};
+      },
+      onAction: (api) => {
+        autoCheckEnabled = !autoCheckEnabled;
+        api.setActive(autoCheckEnabled);
+        Notifier.show(
+          autoCheckEnabled ? 'בדיקת איות אוטומטית הופעלה' : 'בדיקת איות אוטומטית כובתה',
+          'info'
+        );
+        if (autoCheckEnabled) runSpellCheck(false, true);
+      },
+    });
+
+    // Dictionary manager button
+    editor.ui.registry.addButton('hebrewspellcheck_dictionary', {
+      text:    'מילון הארגון',
+      tooltip: 'ניהול מילון מילים מאושרות של הארגון',
+      onAction: () => DictionaryManager.open(),
+    });
+
     // ── Menu items ──
 
     editor.ui.registry.addMenuItem('hebrewspellcheck', {
@@ -642,6 +917,11 @@
     editor.ui.registry.addMenuItem('hebrewspellcheck_clear', {
       text:    'נקה סימוני איות',
       onAction: clearAllHighlights,
+    });
+
+    editor.ui.registry.addMenuItem('hebrewspellcheck_dictionary', {
+      text:    'ניהול מילון הארגון',
+      onAction: () => DictionaryManager.open(),
     });
 
     // ── Context menu on right-click of a misspelled word ──
