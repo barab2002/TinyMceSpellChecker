@@ -1,8 +1,8 @@
 """
-Dictionary management endpoints:
-  GET  /dictionary          — list all custom words
-  POST /dictionary/add      — add a word
-  POST /dictionary/remove   — remove a word
+Organisational dictionary endpoints:
+  GET  /dictionary        — list all custom words
+  POST /dictionary/add    — add a word (idempotent)
+  POST /dictionary/remove — remove a word
 """
 import logging
 
@@ -14,34 +14,49 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.get("", response_model=DictionaryResponse)
-async def list_dictionary(request: Request):
-    """Return all words currently in the organisational dictionary."""
-    svc = request.app.state.dict_service
+@router.get(
+    "",
+    response_model=DictionaryResponse,
+    summary="List all custom dictionary words",
+    description=(
+        "Returns every word in the organisational dictionary sorted alphabetically. "
+        "These words are **always accepted** during spell-check regardless of Hunspell's verdict."
+    ),
+)
+async def list_dictionary(request: Request) -> DictionaryResponse:
+    svc   = request.app.state.dict_service
     words = svc.list_words()
     return DictionaryResponse(words=words, count=len(words))
 
 
-@router.post("/add", response_model=DictionaryResponse)
-async def add_word(body: DictionaryWord, request: Request):
-    """Add a word to the organisational dictionary."""
+@router.post(
+    "/add",
+    response_model=DictionaryResponse,
+    summary="Add a word to the custom dictionary",
+    description=(
+        "Adds a word to the organisational dictionary. "
+        "Idempotent — if the word already exists the request succeeds silently. "
+        "The TinyMCE plugin calls this endpoint when the user clicks **'הוסף למילון'**."
+    ),
+)
+async def add_word(body: DictionaryWord, request: Request) -> DictionaryResponse:
     svc = request.app.state.dict_service
     try:
-        added = svc.add(body.word)
+        svc.add(body.word)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-
-    if not added:
-        logger.debug("Word already in dictionary: %r", body.word)
-
     words = svc.list_words()
     return DictionaryResponse(words=words, count=len(words))
 
 
-@router.post("/remove", response_model=DictionaryResponse)
-async def remove_word(body: DictionaryWord, request: Request):
-    """Remove a word from the organisational dictionary."""
-    svc = request.app.state.dict_service
+@router.post(
+    "/remove",
+    response_model=DictionaryResponse,
+    summary="Remove a word from the custom dictionary",
+    description="Removes a word from the organisational dictionary. Returns 404 if not found.",
+)
+async def remove_word(body: DictionaryWord, request: Request) -> DictionaryResponse:
+    svc     = request.app.state.dict_service
     removed = svc.remove(body.word)
     if not removed:
         raise HTTPException(

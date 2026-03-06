@@ -29,7 +29,33 @@ def _maybe_strip_html(text: str) -> str:
     return html.unescape(stripped)
 
 
-@router.post("/check", response_model=SpellCheckResponse)
+@router.post(
+    "/check",
+    response_model=SpellCheckResponse,
+    summary="Check text for spelling errors",
+    description="""
+Submit **plain text** (not raw HTML) and receive a list of misspelled Hebrew words
+with character offsets and spelling suggestions.
+
+### How offsets work
+
+`start` and `end` are character offsets in the `text` you submitted.
+
+```
+text = "שלומ לכולם"
+              ↑    ↑
+         start=0  end=4  →  word="שלומ"
+```
+
+The TinyMCE plugin uses these offsets to locate and highlight the exact text nodes
+in the editor without ever touching HTML markup.
+
+### Custom dictionary priority
+
+Words in the organisational dictionary (`POST /dictionary/add`) are **always accepted**,
+even if Hunspell flags them. Add product names, acronyms, and customer names there.
+""",
+)
 async def check_spelling(request_body: SpellCheckRequest, request: Request):
     spell_service = request.app.state.spell_service
     dict_service = request.app.state.dict_service
