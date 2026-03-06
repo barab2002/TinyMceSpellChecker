@@ -3,54 +3,54 @@
  * =======================================
  * File: plugin/hebrewspellcheck/plugin.js
  *
- * Load in TinyMCE via:
+ * Zero-dependency, single-file plugin. No build step required.
+ *
+ * Integration (tinymce.init):
+ * ─────────────────────────────────────────────────────────────
  *   tinymce.init({
- *     external_plugins: { hebrewspellcheck: '/path/to/hebrewspellcheck/plugin.js' },
- *     toolbar: 'hebrewspellcheck',
- *     ...hebrewSpellCheckConfig
+ *     external_plugins: {
+ *       hebrewspellcheck: '/plugin/hebrewspellcheck/plugin.js',
+ *     },
+ *     toolbar: 'hebrewspellcheck hebrewspellcheck_clear | bold italic ...',
+ *     extended_valid_elements: 'span[class|data-word|data-suggestions]',
+ *     browser_spellcheck: false,
+ *
+ *     // Plugin-specific options:
+ *     hebrewspellcheck_api_url:         'http://localhost:8000',
+ *     hebrewspellcheck_language:        'he-IL',
+ *     hebrewspellcheck_max_suggestions: 5,
  *   });
  *
- * Plugin config keys (passed via tinymce.init options):
- *   hebrewspellcheck_api_url  — backend base URL (default: http://localhost:8000)
- *   hebrewspellcheck_language — BCP-47 language tag    (default: he-IL)
- *   hebrewspellcheck_max_suggestions — integer         (default: 5)
- *
  * Architecture
- * ------------
- *  1. User clicks "בדיקת איות" toolbar button.
- *  2. Plugin walks the editor DOM (text nodes only) to build a plain-text
- *     corpus with character-offset metadata.
- *  3. Plain text is sent to POST /spell/check.
- *  4. Server returns misspelled words with start/end offsets in that plain text.
- *  5. Plugin maps each offset back to the exact text node(s) and wraps the
- *     misspelled run in a <span class="mce-spellcheck-word"> element.
- *  6. A click listener on the editor body detects clicks on those spans and
- *     shows a lightweight popover with suggestions / ignore / add-to-dict actions.
+ * ─────────────────────────────────────────────────────────────
+ *  1. "בדיקת איות" button clicked.
+ *  2. Walk editor DOM text nodes → build plain-text corpus + segment map.
+ *  3. POST /spell/check with plain text.
+ *  4. Map returned offsets back to DOM text nodes.
+ *  5. Wrap misspelled runs in <span class="mce-spellcheck-word">.
+ *  6. Click on span → show suggestion popover (createElement only, no innerHTML).
  *
- * Safety notes
- * ------------
- *  • Only TEXT_NODE nodes are walked — link hrefs, image srcs, data attributes,
- *    and formatting tags are never touched.
- *  • Existing highlights are removed before re-running (idempotent).
- *  • No innerHTML assignment is used in the suggestion popover — all DOM is
- *    built via createElement/textContent to prevent XSS.
- *  • The editor's undo stack is preserved: we use a single editor.undoManager
- *    transaction around all DOM mutations.
+ * Safety
+ * ─────────────────────────────────────────────────────────────
+ *  • Only TEXT_NODE nodes are ever touched — hrefs, src, data-* untouched.
+ *  • All DOM creation uses ownerDocument (correct in iframe mode).
+ *  • Popover built with createElement/textContent — XSS impossible.
+ *  • All DOM mutations inside editor.undoManager.transact() (single undo step).
  */
 
 /* global tinymce */
 (function () {
   'use strict';
 
-  // ─── Constants ────────────────────────────────────────────────────────────
+  // ─── Constants ─────────────────────────────────────────────────────────────
 
-  const PLUGIN_NAME      = 'hebrewspellcheck';
-  const SPAN_CLASS       = 'mce-spellcheck-word';
-  const SPAN_ACTIVE_CLS  = 'mce-spellcheck-word--active';
-  const POPOVER_ID       = 'mce-spellcheck-popover';
-  const STYLE_ID         = 'mce-spellcheck-styles';
+  const PLUGIN_NAME     = 'hebrewspellcheck';
+  const SPAN_CLASS      = 'mce-spellcheck-word';
+  const SPAN_ACTIVE_CLS = 'mce-spellcheck-word--active';
+  const POPOVER_ID      = 'mce-spellcheck-popover';
+  const STYLE_ID        = 'mce-spellcheck-styles';
 
-  // ─── Styles injected into the editor <head> ───────────────────────────────
+  // ─── CSS injected into editor content document ─────────────────────────────
 
   const EDITOR_CSS = `
     .${SPAN_CLASS} {
@@ -64,11 +64,8 @@
     }
   `;
 
-  // ─── API client ───────────────────────────────────────────────────────────
+  // ─── API client ────────────────────────────────────────────────────────────
 
-  /**
-   * Thin fetch wrapper for the spell-check backend.
-   */
   const Api = {
     _baseUrl: 'http://localhost:8000',
     _language: 'he-IL',
@@ -87,6 +84,7 @@
           language: this._language,
           options: { includeSuggestions: true, maxSuggestions },
         }),
+        signal: AbortSignal.timeout(15000),  // 15 s timeout
       });
       if (!res.ok) {
         const body = await res.text().catch(() => '');
@@ -100,130 +98,129 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ word }),
+        signal: AbortSignal.timeout(5000),
       });
-      if (!res.ok) throw new Error(`Dictionary API error ${res.status}`);
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Dictionary API error ${res.status}: ${body}`);
+      }
       return res.json();
     },
   };
 
-  // ─── Text extraction ──────────────────────────────────────────────────────
+  // ─── Text extraction ───────────────────────────────────────────────────────
 
   /**
-   * Walk the editor body collecting TEXT_NODE content.
+   * Walk the editor body and collect all TEXT_NODE content.
    *
-   * Returns:
-   *   {
-   *     plainText: string,          // concatenated text of all text nodes
-   *     segments: Array<{           // one entry per text node
-   *       node: Text,
-   *       start: number,            // offset of node's text in plainText
-   *       end:   number,
-   *     }>
-   *   }
+   * Returns { plainText: string, segments: Array<Segment> } where each
+   * Segment is:
+   *   { node: Text, start: number, end: number, wrapped: boolean }
    *
-   * We insert a space between block-level siblings so that words at
-   * paragraph boundaries don't merge (e.g. "wordA</p><p>wordB" → "wordA wordB").
+   * A space is inserted between block-level siblings so that
+   * "wordA</p><p>wordB" becomes "wordA wordB" in plainText.
+   *
+   * @param {Element} editorBody - editor.getBody()
    */
   function extractTextSegments(editorBody) {
     const BLOCK_TAGS = new Set([
-      'P','DIV','H1','H2','H3','H4','H5','H6','LI','TD','TH',
-      'BLOCKQUOTE','PRE','ARTICLE','SECTION','HEADER','FOOTER',
-      'FIGCAPTION','CAPTION',
+      'P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+      'LI', 'TD', 'TH', 'BLOCKQUOTE', 'PRE',
+      'ARTICLE', 'SECTION', 'HEADER', 'FOOTER', 'FIGCAPTION', 'CAPTION',
     ]);
 
-    const segments = [];
-    let plainText  = '';
-
-    const walker = document.createTreeWalker(
+    // Use the editor's own document for the TreeWalker (correct in iframe mode)
+    const editorDoc = editorBody.ownerDocument;
+    const walker    = editorDoc.createTreeWalker(
       editorBody,
       NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
       null
     );
 
-    let prevWasBlock = false;
-    let node;
+    const segments  = [];
+    let   plainText = '';
+    let   prevWasBlock = false;
+    let   node;
 
     while ((node = walker.nextNode())) {
       if (node.nodeType === Node.ELEMENT_NODE) {
-        if (BLOCK_TAGS.has(node.tagName)) {
-          // We'll append a separator when we next encounter a text node
-          prevWasBlock = true;
-        }
+        if (BLOCK_TAGS.has(node.tagName)) prevWasBlock = true;
         continue;
       }
 
       // TEXT_NODE
-      // Skip content inside spell-check spans themselves (avoid double processing)
-      if (node.parentElement && node.parentElement.classList.contains(SPAN_CLASS)) {
-        // Include it as text but don't record its node for wrapping
-        // (it is already wrapped)
-        const text = node.textContent;
-        if (prevWasBlock && plainText) { plainText += ' '; prevWasBlock = false; }
-        segments.push({ node, start: plainText.length, end: plainText.length + text.length, wrapped: true });
-        plainText += text;
-        continue;
-      }
-
       const text = node.textContent;
       if (!text) continue;
 
+      const parentEl = node.parentElement;
+
+      // Insert space at block boundary so words don't merge across paragraphs
       if (prevWasBlock && plainText) {
-        plainText += ' ';
+        plainText  += ' ';
         prevWasBlock = false;
       }
 
-      segments.push({ node, start: plainText.length, end: plainText.length + text.length, wrapped: false });
+      const start   = plainText.length;
+      const end     = start + text.length;
+      // "wrapped" means this node is already inside a spell-check span
+      const wrapped = !!(parentEl && parentEl.classList.contains(SPAN_CLASS));
+
+      segments.push({ node, start, end, wrapped });
       plainText += text;
     }
 
     return { plainText, segments };
   }
 
-  // ─── Highlighting ─────────────────────────────────────────────────────────
+  // ─── Highlighting ──────────────────────────────────────────────────────────
 
   /**
-   * Remove all existing spell-check spans, restoring their text nodes.
-   * Must be called before re-running a check.
+   * Remove all spell-check spans from the editor body, restoring plain text.
+   * Call this before every spell-check run (idempotent).
    */
   function clearHighlights(editorBody) {
-    const spans = editorBody.querySelectorAll(`.${SPAN_CLASS}`);
-    spans.forEach((span) => {
+    editorBody.querySelectorAll(`.${SPAN_CLASS}`).forEach((span) => {
       const parent = span.parentNode;
       if (!parent) return;
-      // Replace span with its text content
-      while (span.firstChild) {
-        parent.insertBefore(span.firstChild, span);
-      }
+      while (span.firstChild) parent.insertBefore(span.firstChild, span);
       parent.removeChild(span);
-      parent.normalize(); // merge adjacent text nodes
+      parent.normalize();
     });
   }
 
   /**
-   * Wrap a range within a single text node in a spell-check span.
-   * Returns the created span element.
+   * Wrap a sub-range of a text node in a spell-check span.
+   *
+   * IMPORTANT: uses textNode.ownerDocument.createElement so this works
+   * correctly inside TinyMCE's iframe (different document from host page).
+   *
+   * @param {Text}     textNode
+   * @param {number}   localStart - start within textNode.textContent
+   * @param {number}   localEnd   - end   within textNode.textContent
+   * @param {string}   word
+   * @param {string[]} suggestions
+   * @returns {HTMLSpanElement}
    */
   function wrapTextNodeRange(textNode, localStart, localEnd, word, suggestions) {
-    // Split text node: [prefix][misspelled][suffix]
-    const text = textNode.textContent;
-    const prefix = text.slice(0, localStart);
-    const misspelled = text.slice(localStart, localEnd);
-    const suffix = text.slice(localEnd);
+    const doc    = textNode.ownerDocument; // ← use the correct (iframe) document
+    const text   = textNode.textContent;
+    const before = text.slice(0, localStart);
+    const middle = text.slice(localStart, localEnd);
+    const after  = text.slice(localEnd);
 
-    const span = document.createElement('span');
-    span.className = SPAN_CLASS;
-    span.textContent = misspelled;
-    span.dataset.word = word;
-    span.dataset.suggestions = JSON.stringify(suggestions);
+    const span = doc.createElement('span');
+    span.className            = SPAN_CLASS;
+    span.textContent          = middle;
+    span.dataset.word         = word;
+    span.dataset.suggestions  = JSON.stringify(suggestions);
 
     const parent = textNode.parentNode;
 
-    if (prefix) {
-      parent.insertBefore(document.createTextNode(prefix), textNode);
-    }
+    if (before) parent.insertBefore(doc.createTextNode(before), textNode);
     parent.insertBefore(span, textNode);
-    if (suffix) {
-      textNode.textContent = suffix;
+
+    if (after) {
+      textNode.textContent = after;
     } else {
       parent.removeChild(textNode);
     }
@@ -232,67 +229,51 @@
   }
 
   /**
-   * Apply all misspellings returned by the API to the editor DOM.
+   * Map API misspelling offsets back to DOM text nodes and wrap them.
    *
-   * Strategy:
-   *   For each misspelling {start, end}, find the segment(s) that cover
-   *   that range.  If the range is fully inside one text node, wrap it.
-   *   Cross-node misspellings (rare edge case) are skipped to be safe.
+   * Processes in reverse offset order so earlier wraps don't shift later offsets.
    */
   function applyHighlights(segments, misspellings) {
-    // Sort in reverse order so that earlier offsets don't shift when we split
     const sorted = [...misspellings].sort((a, b) => b.start - a.start);
 
-    // Rebuild segment list: we need the current (live) list because wrapping
-    // splits text nodes.  We'll do a single pass in reverse.
     for (const miss of sorted) {
       const { word, start: mStart, end: mEnd, suggestions } = miss;
 
-      // Find the segment that fully contains this range
+      // Find the one segment that fully contains this misspelling range
       const seg = segments.find(
         (s) => !s.wrapped && s.start <= mStart && s.end >= mEnd
       );
-      if (!seg) continue; // cross-node or already wrapped — skip safely
+      if (!seg) continue; // spans a node boundary or already wrapped — skip safely
 
       const localStart = mStart - seg.start;
       const localEnd   = mEnd   - seg.start;
 
-      // Sanity: make sure the node still contains the expected text
+      // Sanity check: does the node actually contain the expected text?
       const nodeText = seg.node.textContent;
-      if (nodeText.slice(localStart, localEnd) !== word &&
-          // Tolerate nikud-stripped mismatches
-          nodeText.slice(localStart, localEnd).replace(/[\u0591-\u05C7]/g, '') !== word) {
-        continue;
-      }
+      const slice    = nodeText.slice(localStart, localEnd);
+      // Allow nikud-stripped matches (API strips nikud, DOM may have it)
+      const sliceClean = slice.replace(/[\u0591-\u05C7]/g, '');
+      if (slice !== word && sliceClean !== word) continue;
 
-      const span = wrapTextNodeRange(seg.node, localStart, localEnd, word, suggestions || []);
+      wrapTextNodeRange(seg.node, localStart, localEnd, word, suggestions || []);
 
-      // Update segment so subsequent (lower-offset) items still resolve correctly.
-      // After wrapping, seg.node contains the suffix text (or is removed).
-      // The prefix, span, and suffix have replaced seg.node.
-      // Adjust seg to reflect only the suffix (text after the misspelling).
+      // After wrapping, seg.node holds only the suffix text (or was removed).
+      // Advance seg.start so lower-offset segments still resolve correctly.
       const suffixLen = nodeText.length - localEnd;
-      if (suffixLen > 0) {
-        seg.start = mEnd;
-        // seg.node now holds the suffix text
-      } else {
-        seg.start = seg.end; // segment exhausted
-      }
+      seg.start = suffixLen > 0 ? mEnd : seg.end;
     }
   }
 
-  // ─── Suggestion popover ───────────────────────────────────────────────────
+  // ─── Suggestion popover ────────────────────────────────────────────────────
 
   /**
-   * The popover is rendered in the HOST document (not the editor iframe) so
-   * it can overflow the editor boundaries.  It is absolutely positioned using
-   * the span's bounding rect.
+   * Floating suggestion popover rendered in the HOST document so it can
+   * overflow the editor iframe boundaries.
    *
-   * All DOM construction uses createElement/textContent — no innerHTML — to
-   * prevent any XSS from suggestion strings.
+   * Built 100% with createElement/textContent — no innerHTML anywhere.
    */
   const Popover = {
-    _el: null,
+    _el:          null,
     _currentSpan: null,
 
     _build() {
@@ -300,33 +281,39 @@
       const el = document.createElement('div');
       el.id = POPOVER_ID;
       Object.assign(el.style, {
-        position:        'fixed',
-        zIndex:          '2147483647',
-        background:      '#fff',
-        border:          '1px solid #d1d5db',
-        borderRadius:    '6px',
-        boxShadow:       '0 4px 16px rgba(0,0,0,0.15)',
-        minWidth:        '180px',
-        maxWidth:        '280px',
-        fontFamily:      'system-ui, Arial, sans-serif',
-        fontSize:        '13px',
-        padding:         '6px 0',
-        display:         'none',
-        direction:       'rtl',
+        position:     'fixed',
+        zIndex:       '2147483647',
+        background:   '#ffffff',
+        border:       '1px solid #d1d5db',
+        borderRadius: '8px',
+        boxShadow:    '0 4px 20px rgba(0,0,0,0.18)',
+        minWidth:     '190px',
+        maxWidth:     '300px',
+        fontFamily:   'system-ui, -apple-system, Arial, sans-serif',
+        fontSize:     '13px',
+        padding:      '6px 0',
+        display:      'none',
+        direction:    'rtl',
+        lineHeight:   '1.4',
       });
       document.body.appendChild(el);
       this._el = el;
 
-      // Close on outside click
+      // Close when clicking anywhere outside the popover
       document.addEventListener('mousedown', (e) => {
-        if (this._el && !this._el.contains(e.target)) {
-          this.hide();
-        }
+        if (this._el && !this._el.contains(e.target)) this.hide();
       }, true);
     },
 
-    show(span, editor, onRecheck) {
+    /**
+     * @param {HTMLSpanElement} span       - the clicked spell-check span
+     * @param {object}          editor     - TinyMCE editor instance
+     * @param {Function}        onReplace  - called after a word is replaced
+     */
+    show(span, editor, onReplace) {
       this._build();
+      this.hide(); // close any existing popover first
+
       this._currentSpan = span;
       span.classList.add(SPAN_ACTIVE_CLS);
 
@@ -335,112 +322,133 @@
       try { suggestions = JSON.parse(span.dataset.suggestions || '[]'); } catch (_) {}
 
       const el = this._el;
-      el.innerHTML = ''; // safe: we fill it below with createElement only
+      // Clear previous content (safe: will be rebuilt below with createElement)
+      while (el.firstChild) el.removeChild(el.firstChild);
 
-      // Header
+      // ── Header: the misspelled word ──
       const header = document.createElement('div');
       Object.assign(header.style, {
-        padding:       '6px 12px 4px',
-        fontWeight:    '600',
-        color:         '#374151',
-        borderBottom:  '1px solid #e5e7eb',
-        marginBottom:  '4px',
-        direction:     'rtl',
+        padding:      '7px 14px 5px',
+        fontWeight:   '700',
+        color:        '#b91c1c',
+        borderBottom: '1px solid #f3f4f6',
+        marginBottom: '4px',
+        direction:    'rtl',
       });
-      header.textContent = `"${word}"`;
+      header.textContent = `⚠ ${word}`;
       el.appendChild(header);
 
-      const addItem = (label, onClick, isRed = false) => {
-        const btn = document.createElement('div');
-        Object.assign(btn.style, {
-          padding:    '6px 12px',
+      // Helper: add a clickable row
+      const addRow = (label, onClick) => {
+        const row = document.createElement('div');
+        Object.assign(row.style, {
+          padding:    '7px 14px',
           cursor:     'pointer',
-          color:      isRed ? '#dc2626' : '#111827',
+          color:      '#111827',
           direction:  'rtl',
+          whiteSpace: 'nowrap',
+          overflow:   'hidden',
+          textOverflow: 'ellipsis',
         });
-        btn.textContent = label;
-        btn.addEventListener('mouseover', () => (btn.style.background = '#f3f4f6'));
-        btn.addEventListener('mouseout',  () => (btn.style.background = ''));
-        btn.addEventListener('mousedown', (e) => { e.preventDefault(); onClick(); });
-        el.appendChild(btn);
+        row.textContent = label;
+        row.addEventListener('mouseover', () => (row.style.background = '#f9fafb'));
+        row.addEventListener('mouseout',  () => (row.style.background = ''));
+        // mousedown (not click) so focus doesn't leave the editor before action
+        row.addEventListener('mousedown', (e) => { e.preventDefault(); onClick(); });
+        el.appendChild(row);
+        return row;
       };
 
-      // Suggestions section
+      // ── Suggestions ──
       if (suggestions.length > 0) {
-        const sugLabel = document.createElement('div');
-        Object.assign(sugLabel.style, {
-          padding:   '2px 12px',
-          fontSize:  '11px',
-          color:     '#6b7280',
+        const label = document.createElement('div');
+        Object.assign(label.style, {
+          padding:  '2px 14px 3px',
+          fontSize: '11px',
+          color:    '#6b7280',
           direction: 'rtl',
         });
-        sugLabel.textContent = 'הצעות תיקון:';
-        el.appendChild(sugLabel);
+        label.textContent = 'הצעות תיקון:';
+        el.appendChild(label);
 
         suggestions.forEach((sug) => {
-          addItem(`← ${sug}`, () => {
-            this._replaceWord(span, sug, editor);
+          addRow(`• ${sug}`, () => {
+            this._replace(span, sug, editor);
             this.hide();
-            if (typeof onRecheck === 'function') onRecheck();
+            if (typeof onReplace === 'function') onReplace();
           });
         });
       } else {
-        const noSug = document.createElement('div');
-        Object.assign(noSug.style, { padding: '4px 12px', color: '#9ca3af', direction: 'rtl' });
-        noSug.textContent = 'אין הצעות';
-        el.appendChild(noSug);
+        const none = document.createElement('div');
+        Object.assign(none.style, { padding: '5px 14px', color: '#9ca3af', direction: 'rtl' });
+        none.textContent = '(אין הצעות)';
+        el.appendChild(none);
       }
 
-      // Separator
-      const sep = document.createElement('hr');
-      Object.assign(sep.style, { margin: '4px 0', border: 'none', borderTop: '1px solid #e5e7eb' });
-      el.appendChild(sep);
+      // ── Divider ──
+      const hr = document.createElement('div');
+      Object.assign(hr.style, { margin: '5px 0', borderTop: '1px solid #f3f4f6' });
+      el.appendChild(hr);
 
-      // Ignore
-      addItem('התעלם', () => {
-        this._ignoreWord(span);
-        this.hide();
-      });
+      // ── Actions ──
+      addRow('התעלם', () => { this._ignore(span); this.hide(); });
 
-      // Add to dictionary
-      addItem('הוסף למילון', async () => {
+      addRow('הוסף למילון', async () => {
         try {
           await Api.addToDictionary(word);
-          // Remove ALL highlights for this word across the document
-          this._removeAllHighlightsForWord(word, editor);
+          this._removeWordHighlights(word, editor);
           this.hide();
-          Notifier.show('המילה נוספה למילון בהצלחה', 'success');
-        } catch (e) {
-          Notifier.show('שגיאה בהוספה למילון', 'error');
+          Notifier.show('המילה נוספה למילון בהצלחה ✓', 'success');
+        } catch (err) {
+          Notifier.show('שגיאה בהוספה למילון — בדוק שהשרת פועל', 'error');
         }
-      }, false);
+      });
 
-      // Position the popover near the span
-      const editorIframe = editor.getContainer().querySelector('iframe');
-      const iframeRect   = editorIframe ? editorIframe.getBoundingClientRect() : { left: 0, top: 0 };
-      const spanRect     = span.getBoundingClientRect();
+      // ── Position ──
+      this._position(span, editor);
+    },
 
+    /**
+     * Position the popover below the span, staying within the viewport.
+     * Works for both iframe mode and inline mode.
+     */
+    _position(span, editor) {
+      const el = this._el;
       el.style.display = 'block';
 
-      const popW  = el.offsetWidth;
-      const popH  = el.offsetHeight;
-      const vw    = window.innerWidth;
-      const vh    = window.innerHeight;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
 
-      // Convert span rect from iframe coords to viewport coords
-      const absLeft = iframeRect.left + spanRect.left;
-      const absTop  = iframeRect.top  + spanRect.bottom + 4;
+      // The span lives inside the editor which may be an iframe.
+      // span.getBoundingClientRect() returns coords relative to the
+      // iframe's viewport. We need host-document viewport coords.
+      const container = editor.getContainer && editor.getContainer();
+      const iframeEl  = container ? container.querySelector('iframe') : null;
+      const iframeOff = iframeEl
+        ? iframeEl.getBoundingClientRect()
+        : { left: 0, top: 0, bottom: 0 };
 
-      let left = absLeft;
-      let top  = absTop;
+      const spanRect = span.getBoundingClientRect();
 
-      // Keep inside viewport
-      if (left + popW > vw) left = vw - popW - 8;
-      if (left < 0) left = 8;
-      if (top + popH > vh) top = iframeRect.top + spanRect.top - popH - 4;
+      // Convert iframe-relative → host-document-relative
+      const spanLeft   = iframeOff.left + spanRect.left;
+      const spanBottom = iframeOff.top  + spanRect.bottom;
+      const spanTop    = iframeOff.top  + spanRect.top;
 
-      el.style.left = `${left}px`;
-      el.style.top  = `${top}px`;
+      const popW = el.offsetWidth;
+      const popH = el.offsetHeight;
+
+      let left = spanLeft;
+      let top  = spanBottom + 6;
+
+      // Flip above if below-fold
+      if (top + popH > vh - 8) top = spanTop - popH - 6;
+      // Clamp horizontal
+      if (left + popW > vw - 8) left = vw - popW - 8;
+      if (left < 8) left = 8;
+
+      el.style.left = `${Math.round(left)}px`;
+      el.style.top  = `${Math.round(top)}px`;
     },
 
     hide() {
@@ -451,86 +459,98 @@
       if (this._el) this._el.style.display = 'none';
     },
 
-    _replaceWord(span, replacement, editor) {
+    _replace(span, replacement, editor) {
+      // ownerDocument ensures we create the text node in the correct document
+      const textNode = span.ownerDocument.createTextNode(replacement);
       editor.undoManager.transact(() => {
-        const textNode = document.createTextNode(replacement);
         span.parentNode.replaceChild(textNode, span);
         textNode.parentNode.normalize();
       });
     },
 
-    _ignoreWord(span) {
-      // Replace span with its text content (remove underline), keep word
-      const textNode = document.createTextNode(span.textContent);
+    _ignore(span) {
+      const textNode = span.ownerDocument.createTextNode(span.textContent);
       span.parentNode.replaceChild(textNode, span);
       textNode.parentNode.normalize();
     },
 
-    _removeAllHighlightsForWord(word, editor) {
+    _removeWordHighlights(word, editor) {
       const body = editor.getBody();
-      const spans = body.querySelectorAll(`.${SPAN_CLASS}`);
-      spans.forEach((s) => {
-        if (s.dataset.word === word) {
-          const t = document.createTextNode(s.textContent);
-          s.parentNode.replaceChild(t, s);
-          t.parentNode.normalize();
-        }
+      body.querySelectorAll(`.${SPAN_CLASS}`).forEach((s) => {
+        if (s.dataset.word !== word) return;
+        const t = s.ownerDocument.createTextNode(s.textContent);
+        s.parentNode.replaceChild(t, s);
+        t.parentNode.normalize();
       });
     },
   };
 
-  // ─── Toast notifications ──────────────────────────────────────────────────
+  // ─── Toast notifications ───────────────────────────────────────────────────
 
   const Notifier = {
     show(message, type = 'info') {
-      const toast = document.createElement('div');
-      const bg    = type === 'success' ? '#16a34a' : type === 'error' ? '#dc2626' : '#2563eb';
-      Object.assign(toast.style, {
+      const BG = { success: '#16a34a', error: '#dc2626', info: '#2563eb' };
+      const el  = document.createElement('div');
+      Object.assign(el.style, {
         position:     'fixed',
         bottom:       '24px',
         right:        '24px',
-        background:   bg,
+        background:   BG[type] || BG.info,
         color:        '#fff',
         padding:      '10px 18px',
         borderRadius: '6px',
         fontFamily:   'system-ui, Arial, sans-serif',
         fontSize:     '13px',
+        fontWeight:   '500',
         zIndex:       '2147483647',
         boxShadow:    '0 4px 12px rgba(0,0,0,0.2)',
         direction:    'rtl',
-        maxWidth:     '320px',
+        maxWidth:     '340px',
+        pointerEvents: 'none',
       });
-      toast.textContent = message;
-      document.body.appendChild(toast);
-      setTimeout(() => document.body.removeChild(toast), 3500);
+      el.textContent = message;
+      document.body.appendChild(el);
+      setTimeout(() => { if (el.parentNode) el.parentNode.removeChild(el); }, 3500);
     },
   };
 
-  // ─── Main plugin ──────────────────────────────────────────────────────────
+  // ─── Plugin registration ───────────────────────────────────────────────────
 
   tinymce.PluginManager.add(PLUGIN_NAME, function (editor) {
 
-    // --- Resolve config from TinyMCE init options ---
-    const apiUrl    = editor.options.get('hebrewspellcheck_api_url') || 'http://localhost:8000';
-    const language  = editor.options.get('hebrewspellcheck_language') || 'he-IL';
-    const maxSug    = editor.options.get('hebrewspellcheck_max_suggestions') || 5;
+    // ── STEP 1: Register options FIRST (required by TinyMCE v7 before any get()) ──
+    editor.options.register('hebrewspellcheck_api_url', {
+      processor: 'string',
+      default:   'http://localhost:8000',
+    });
+    editor.options.register('hebrewspellcheck_language', {
+      processor: 'string',
+      default:   'he-IL',
+    });
+    editor.options.register('hebrewspellcheck_max_suggestions', {
+      processor: 'number',
+      default:   5,
+    });
+
+    // ── STEP 2: Read options (safe now that they're registered) ──
+    const apiUrl   = editor.options.get('hebrewspellcheck_api_url');
+    const language = editor.options.get('hebrewspellcheck_language');
+    const maxSug   = editor.options.get('hebrewspellcheck_max_suggestions');
 
     Api.init(apiUrl, language);
 
-    let _lastSegments = []; // used for re-check reference
-
-    // --- Inject CSS into editor iframe ---
+    // ── Inject spell-check CSS into the editor content document ──
     editor.on('init', () => {
       const doc = editor.getDoc();
-      if (!doc.getElementById(STYLE_ID)) {
-        const style = doc.createElement('style');
-        style.id = STYLE_ID;
+      if (doc && !doc.getElementById(STYLE_ID)) {
+        const style      = doc.createElement('style');
+        style.id         = STYLE_ID;
         style.textContent = EDITOR_CSS;
         doc.head.appendChild(style);
       }
     });
 
-    // --- Click handler on spell-check spans ---
+    // ── Click handler: open popover when a misspelled word is clicked ──
     editor.on('click', (e) => {
       const target = e.target;
       if (target && target.classList && target.classList.contains(SPAN_CLASS)) {
@@ -542,124 +562,101 @@
       }
     });
 
-    // --- Core spell-check function ---
-    async function runSpellCheck(showLoadingIndicator = true) {
+    // ── Close popover when editor loses focus ──
+    editor.on('blur', () => Popover.hide());
+
+    // ── Core: run the spell check ──
+    async function runSpellCheck(showProgress = true) {
       Popover.hide();
 
       const body = editor.getBody();
       if (!body) return;
 
-      // 1. Clear previous highlights
-      editor.undoManager.transact(() => {
-        clearHighlights(body);
-      });
+      // Clear existing highlights first
+      editor.undoManager.transact(() => clearHighlights(body));
 
-      // 2. Extract plain text + segment map
+      // Extract plain text + segment map AFTER clearing highlights
       const { plainText, segments } = extractTextSegments(body);
-      _lastSegments = segments;
 
       if (!plainText.trim()) {
-        Notifier.show('אין תוכן לבדיקה', 'info');
+        Notifier.show('אין תוכן לבדיקת איות', 'info');
         return;
       }
 
-      // 3. Toolbar button loading state
-      if (showLoadingIndicator) {
-        editor.setProgressState(true);
-      }
+      if (showProgress) editor.setProgressState(true);
 
       try {
-        // 4. Call API
         const result = await Api.checkText(plainText, maxSug);
 
-        // 5. Apply highlights inside a single undo transaction
         editor.undoManager.transact(() => {
           applyHighlights(segments, result.misspellings || []);
         });
 
         const count = result.total || 0;
         if (count === 0) {
-          Notifier.show('לא נמצאו שגיאות איות', 'success');
+          Notifier.show('לא נמצאו שגיאות איות ✓', 'success');
         } else {
-          Notifier.show(`נמצאו ${count} שגיאות איות — לחץ על מילה מסומנת לפרטים`, 'info');
+          Notifier.show(
+            `נמצאו ${count} שגיאות איות — לחץ על מילה מסומנת לתיקון`,
+            'info'
+          );
         }
-
       } catch (err) {
         console.error('[HebrewSpellCheck]', err);
-        Notifier.show('שגיאה בחיבור לשרת בדיקת האיות. אנא בדוק שהשרת פועל.', 'error');
+        const msg = err.name === 'TimeoutError'
+          ? 'שרת בדיקת האיות לא הגיב בזמן — אנא נסה שוב'
+          : 'שגיאה בחיבור לשרת בדיקת האיות — בדוק שהשרת פועל';
+        Notifier.show(msg, 'error');
       } finally {
-        if (showLoadingIndicator) {
-          editor.setProgressState(false);
-        }
+        if (showProgress) editor.setProgressState(false);
       }
     }
 
     function clearAllHighlights() {
       Popover.hide();
-      editor.undoManager.transact(() => {
-        clearHighlights(editor.getBody());
-      });
-      Notifier.show('הסימונים נוקו', 'info');
+      editor.undoManager.transact(() => clearHighlights(editor.getBody()));
+      Notifier.show('סימוני האיות נוקו', 'info');
     }
 
-    // --- Register option declarations (TinyMCE 7 requires this) ---
-    editor.options.register('hebrewspellcheck_api_url', {
-      processor: 'string',
-      default: 'http://localhost:8000',
-    });
-    editor.options.register('hebrewspellcheck_language', {
-      processor: 'string',
-      default: 'he-IL',
-    });
-    editor.options.register('hebrewspellcheck_max_suggestions', {
-      processor: 'number',
-      default: 5,
-    });
+    // ── Toolbar buttons ──
 
-    // --- Toolbar buttons ---
-
-    // Main spell-check button
     editor.ui.registry.addButton('hebrewspellcheck', {
-      text: 'בדיקת איות',
-      tooltip: 'בדיקת איות בעברית',
+      text:    'בדיקת איות',
+      tooltip: 'הפעל בדיקת איות בעברית',
       onAction: () => runSpellCheck(true),
     });
 
-    // Clear highlights button
     editor.ui.registry.addButton('hebrewspellcheck_clear', {
-      text: 'נקה סימונים',
-      tooltip: 'נקה את סימוני שגיאות האיות',
+      text:    'נקה סימונים',
+      tooltip: 'הסר את כל סימוני האיות',
       onAction: clearAllHighlights,
     });
 
-    // --- Menu items ---
+    // ── Menu items ──
 
     editor.ui.registry.addMenuItem('hebrewspellcheck', {
-      text: 'בדיקת איות בעברית',
-      icon: 'spell-check',
+      text:    'בדיקת איות בעברית',
       onAction: () => runSpellCheck(true),
     });
 
     editor.ui.registry.addMenuItem('hebrewspellcheck_clear', {
-      text: 'נקה סימוני איות',
+      text:    'נקה סימוני איות',
       onAction: clearAllHighlights,
     });
 
-    // --- Context menu (right-click on a spell-check span) ---
+    // ── Context menu on right-click of a misspelled word ──
     editor.ui.registry.addContextMenu('hebrewspellcheck', {
-      update: (element) => {
-        if (element.classList && element.classList.contains(SPAN_CLASS)) {
-          return 'hebrewspellcheck | hebrewspellcheck_clear';
-        }
-        return '';
-      },
+      update: (element) =>
+        element.classList && element.classList.contains(SPAN_CLASS)
+          ? 'hebrewspellcheck | hebrewspellcheck_clear'
+          : '',
     });
 
-    // --- Plugin metadata ---
+    // ── Plugin metadata ──
     return {
       getMetadata: () => ({
         name: 'Hebrew Spell Checker',
-        url: 'https://github.com/your-org/TinyMceSpellChecker',
+        url:  'https://github.com/your-org/TinyMceSpellChecker',
       }),
     };
   });
