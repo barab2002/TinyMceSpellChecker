@@ -746,6 +746,43 @@
     },
   };
 
+  // ─── SVG icon definitions ──────────────────────────────────────────────────
+  // Registered once per editor; referenced by name in button/toggleButton defs.
+
+  const ICONS = {
+    // Spell-check: "A" with squiggle underline + checkmark (Material spellcheck)
+    'hsc-check':
+      '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
+      '<path fill="currentColor" d="M12.45 16h2.09L10 5H8L3.46 16h2.09l1.12-3h4.64zm' +
+      '-5.02-5 1.57-4.19L10.57 11zm11.13 3-1.41-1.41L15 16.17l-.88-.88-1.41 1.41L15 19z"/>' +
+      '</svg>',
+
+    // Clear highlights: eraser
+    'hsc-clear':
+      '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
+      '<path fill="currentColor" d="M15.14 3c-.51 0-1.02.2-1.41.59L2.59 14.73c-.78.77-.78 2.04 0 ' +
+      '2.83L5.03 20H20v-2h-8.36l9.77-9.76c.78-.79.78-2.05 0-2.83l-4.86-4.86c-.4-.39-.9-.55-1.41' +
+      '-.55zm-5.64 13L4 10.5l8-8L17.5 8l-8 8z"/>' +
+      '</svg>',
+
+    // Auto spell-check toggle: lightning bolt
+    'hsc-auto':
+      '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
+      '<path fill="currentColor" d="M7 2v11h3v9l7-12h-4l4-8z"/>' +
+      '</svg>',
+
+    // Dictionary manager: open book
+    'hsc-dict':
+      '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
+      '<path fill="currentColor" d="M21 5c-1.11-.35-2.33-.5-3.5-.5-1.95 0-4.05.4-5.5 1.5' +
+      '-1.45-1.1-3.55-1.5-5.5-1.5S2.45 4.9 1 6v14.65c0 .25.25.5.5.5.1 0 .15-.05.25-.05' +
+      'C3.1 20.45 5.05 20 6.5 20c1.95 0 4.05.4 5.5 1.5 1.35-.85 3.8-1.5 5.5-1.5 1.65 0 ' +
+      '3.35.3 4.75 1.05.1.05.15.05.25.05.25 0 .5-.25.5-.5V6c-.6-.45-1.25-.75-2-1zm0 13.5' +
+      'c-1.1-.35-2.3-.5-3.5-.5-1.7 0-4.15.65-5.5 1.5V8c1.35-.85 3.8-1.5 5.5-1.5 1.2 0 ' +
+      '2.4.15 3.5.5v11.5z"/>' +
+      '</svg>',
+  };
+
   // ─── Plugin registration ───────────────────────────────────────────────────
 
   tinymce.PluginManager.add(PLUGIN_NAME, function (editor) {
@@ -775,6 +812,11 @@
     let   autoCheckEnabled = editor.options.get('hebrewspellcheck_auto_check');
 
     Api.init(apiUrl, language);
+
+    // ── Register custom SVG icons ──
+    Object.entries(ICONS).forEach(([name, svg]) => {
+      editor.ui.registry.addIcon(name, svg);
+    });
 
     // ── Inject spell-check CSS into the editor content document ──
     editor.on('init', () => {
@@ -870,21 +912,21 @@
     // ── Toolbar buttons ──
 
     editor.ui.registry.addButton('hebrewspellcheck', {
-      text:    'בדיקת איות',
-      tooltip: 'הפעל בדיקת איות בעברית',
+      icon:    'hsc-check',
+      tooltip: 'בדיקת איות בעברית',
       onAction: () => runSpellCheck(true),
     });
 
     editor.ui.registry.addButton('hebrewspellcheck_clear', {
-      text:    'נקה סימונים',
-      tooltip: 'הסר את כל סימוני האיות',
+      icon:    'hsc-clear',
+      tooltip: 'נקה סימוני איות',
       onAction: clearAllHighlights,
     });
 
-    // Toggle button — stays "pressed" while auto-check is active
+    // Toggle button — stays "pressed" (highlighted) while auto-check is active
     editor.ui.registry.addToggleButton('hebrewspellcheck_toggle_auto', {
-      text:    'בדיקה אוטומטית',
-      tooltip: 'הפעל/כבה בדיקת איות אוטומטית תוך כדי הקלדה',
+      icon:    'hsc-auto',
+      tooltip: 'בדיקת איות אוטומטית תוך כדי הקלדה',
       onSetup: (api) => {
         api.setActive(autoCheckEnabled);
         return () => {};
@@ -902,8 +944,8 @@
 
     // Dictionary manager button
     editor.ui.registry.addButton('hebrewspellcheck_dictionary', {
-      text:    'מילון הארגון',
-      tooltip: 'ניהול מילון מילים מאושרות של הארגון',
+      icon:    'hsc-dict',
+      tooltip: 'ניהול מילון הארגון',
       onAction: () => DictionaryManager.open(),
     });
 

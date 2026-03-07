@@ -8,16 +8,14 @@ Docker:
   docker compose up --build
 
 Swagger UI: http://localhost:8000/docs
-ReDoc:      http://localhost:8000/redoc
-OpenAPI JSON: http://localhost:8000/openapi.json
 """
 import logging
 import sys
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import ORJSONResponse
 from pythonjsonlogger import jsonlogger
 
 from .config import settings
@@ -72,17 +70,19 @@ curl -s -X POST http://localhost:8000/spell/check \\
 ```js
 tinymce.init({
   external_plugins: { hebrewspellcheck: '/plugin/hebrewspellcheck/plugin.js' },
-  toolbar: 'hebrewspellcheck hebrewspellcheck_clear | bold italic',
+  toolbar: 'hebrewspellcheck hebrewspellcheck_clear hebrewspellcheck_toggle_auto hebrewspellcheck_dictionary | bold italic',
   hebrewspellcheck_api_url: 'http://localhost:8000',
   extended_valid_elements: 'span[class|data-word|data-suggestions]',
   browser_spellcheck: false,
 });
 ```
         """,
-        version="1.0.0",
+        version="1.1.0",
         contact={"name": "Internal Tools Team"},
         docs_url="/docs",
         redoc_url="/redoc",
+        # Use orjson for all JSON responses — 3-5× faster serialisation
+        default_response_class=ORJSONResponse,
         openapi_tags=[
             {
                 "name": "Spell Check",
@@ -102,13 +102,21 @@ tinymce.init({
         ],
     )
 
+    # ── GZip compression (helps large responses) ──
+    app.add_middleware(GZipMiddleware, minimum_size=500)
+
     # ── CORS ──
+    # NOTE: allow_credentials=True is incompatible with allow_origins=["*"].
+    # Browsers (and Swagger "Try it out") reject credentialed wildcard CORS.
+    # We use allow_credentials=False which is correct for a public JSON API.
+    origins = settings.cors_origins_list
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins_list,
-        allow_credentials=True,
-        allow_methods=["GET", "POST"],
-        allow_headers=["*"],
+        allow_origins=origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "Accept", "Authorization"],
+        max_age=3600,
     )
 
     # ── Services (singletons on app.state) ──
@@ -126,9 +134,9 @@ tinymce.init({
 
     # ── Global error handler ──
     @app.exception_handler(Exception)
-    async def _unhandled(req: Request, exc: Exception) -> JSONResponse:
+    async def _unhandled(req: Request, exc: Exception) -> ORJSONResponse:
         logger.exception("Unhandled error: %s", exc)
-        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+        return ORJSONResponse(status_code=500, content={"detail": "Internal server error"})
 
     # ── Health ──
     @app.get(
@@ -153,7 +161,7 @@ tinymce.init({
 
     @app.get("/", tags=["System"], include_in_schema=False)
     async def root() -> dict:
-        return {"message": "Hebrew Spell-Check API. Swagger UI at /docs"}
+        return {"message": "Hebrew Spell-Check API — Swagger UI at /docs"}
 
     logger.info(
         "Startup complete | spell_engine=%s | lang=%s | cors=%s",

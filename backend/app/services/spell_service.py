@@ -1,11 +1,16 @@
 """
 Spell-check service — Hebrew support via spylls (pure Python Hunspell).
 
-Why spylls?
-  - Pure Python: `pip install spylls` — no libhunspell-dev system dependency.
-  - Reads standard .aff / .dic files identically to the C Hunspell library.
-  - Works inside Docker AND in local dev without any apt-get step.
-  - Verified working with the he_IL (hspell 1.4) dictionary bundled in this repo.
+Performance notes
+-----------------
+spylls.suggest() is the bottleneck: pure Python, ~50–200 ms per unknown word.
+Two caches are maintained for the lifetime of the process:
+
+  _lookup_cache  – word → bool  (is it spelled correctly?)
+  _suggest_cache – (word, max_n) → [suggestions]
+
+These are populated on first encounter and reused across all subsequent requests,
+giving near-zero latency for repeated words (which is the common case).
 
 Hebrew tokenisation notes
 -------------------------
@@ -24,7 +29,7 @@ Strategy:
 import logging
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from .dictionary_service import DictionaryService
 
@@ -47,11 +52,13 @@ class SpellService:
     def __init__(self, dict_dir: str, language: str = "he_IL") -> None:
         self.language = language
         self._dic = None
+        # Cross-request caches — populated on first encounter, reused forever
+        self._lookup_cache: Dict[str, bool] = {}
+        self._suggest_cache: Dict[Tuple[str, int], List[str]] = {}
         self._init(dict_dir, language)
 
     def _init(self, dict_dir: str, language: str) -> None:
         lang_fs = language.replace("-", "_")
-        # spylls.Dictionary.from_files() expects path WITHOUT extension
         base = Path(dict_dir) / lang_fs
 
         if not Path(str(base) + ".aff").exists() or not Path(str(base) + ".dic").exists():
@@ -75,27 +82,48 @@ class SpellService:
         return self._dic is not None
 
     def check_word(self, word: str) -> bool:
-        """Return True if correctly spelled. Fails open if engine unavailable."""
+        """Return True if correctly spelled. Uses cross-request cache."""
         if not self._dic:
             return True
         clean = _strip_nikud(word)
         if not clean:
             return True
+
+        if clean in self._lookup_cache:
+            return self._lookup_cache[clean]
+
         try:
-            return bool(self._dic.lookup(clean))
+            result = bool(self._dic.lookup(clean))
         except Exception:
-            return True
+            result = True  # fail open
+
+        self._lookup_cache[clean] = result
+        return result
 
     def get_suggestions(self, word: str, max_n: int = 5) -> List[str]:
-        """Return up to max_n spelling suggestions (strings, never bytes)."""
+        """Return up to max_n spelling suggestions. Results are cached."""
         if not self._dic:
             return []
         clean = _strip_nikud(word)
+        cache_key = (clean, max_n)
+
+        if cache_key in self._suggest_cache:
+            return self._suggest_cache[cache_key]
+
         try:
-            return list(self._dic.suggest(clean))[:max_n]
+            suggestions = list(self._dic.suggest(clean))[:max_n]
         except Exception as exc:
             logger.warning("suggest(%r) failed: %s", word, exc)
-            return []
+            suggestions = []
+
+        self._suggest_cache[cache_key] = suggestions
+        return suggestions
+
+    def cache_stats(self) -> dict:
+        return {
+            "lookup_cached_words": len(self._lookup_cache),
+            "suggest_cached_entries": len(self._suggest_cache),
+        }
 
     # ------------------------------------------------------------------
     # Tokenisation
@@ -143,10 +171,13 @@ class SpellService:
 
         Returns list of dicts: { word, start, end, suggestions, source }
         where start/end are character offsets in the supplied plain text.
+
+        Uses the cross-request instance caches for lookup and suggestions.
         """
         tokens = self.tokenize(text)
         misspellings: List[dict] = []
-        cache: dict = {}  # stripped_word -> (is_correct, [suggestions])
+        # Per-request dedup: avoid re-running suggest() for same clean word twice
+        seen_clean: set = set()
 
         for word, start, end in tokens:
             clean = _strip_nikud(word)
@@ -155,17 +186,20 @@ class SpellService:
             if custom_dict.contains(clean):
                 continue
 
-            if clean not in cache:
-                is_correct  = self.check_word(word)
-                suggestions = (
-                    [] if is_correct
-                    else (self.get_suggestions(word, max_suggestions) if include_suggestions else [])
-                )
-                cache[clean] = (is_correct, suggestions)
-
-            is_correct, suggestions = cache[clean]
+            is_correct = self.check_word(word)
 
             if not is_correct:
+                # Compute suggestions only once per unique clean word per request
+                if clean not in seen_clean:
+                    suggestions = (
+                        self.get_suggestions(word, max_suggestions)
+                        if include_suggestions else []
+                    )
+                    seen_clean.add(clean)
+                else:
+                    cache_key = (_strip_nikud(word), max_suggestions)
+                    suggestions = self._suggest_cache.get(cache_key, [])
+
                 misspellings.append(
                     {"word": word, "start": start, "end": end,
                      "suggestions": suggestions, "source": "hunspell"}
