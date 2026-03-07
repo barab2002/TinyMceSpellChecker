@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import ORJSONResponse
 
+from ..limiter import limiter
 from ..models.schemas import Misspelling, SpellCheckRequest, SpellCheckResponse
 
 router = APIRouter()
@@ -36,7 +37,7 @@ def _maybe_strip_html(text: str) -> str:
 @router.post(
     "/check",
     response_model=SpellCheckResponse,
-    summary="Check text for spelling errors",
+    summary="Check text for spelling errors (rate-limited: 120/min per IP)",
     description="""
 Submit **plain text** (not raw HTML) and receive a list of misspelled Hebrew words
 with character offsets and spelling suggestions.
@@ -60,7 +61,8 @@ Words in the organisational dictionary (`POST /dictionary/add`) are **always acc
 even if Hunspell flags them. Add product names, acronyms, and customer names there.
 """,
 )
-async def check_spelling(request_body: SpellCheckRequest, request: Request):
+@limiter.limit("120/minute")
+async def check_spelling(request: Request, request_body: SpellCheckRequest):
     spell_service = request.app.state.spell_service
     dict_service  = request.app.state.dict_service
 

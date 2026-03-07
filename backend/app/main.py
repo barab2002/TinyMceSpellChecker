@@ -17,8 +17,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import ORJSONResponse
 from pythonjsonlogger import jsonlogger
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from .config import settings
+from .limiter import limiter
 from .models.schemas import HealthResponse
 from .routes import dictionary as dict_router
 from .routes import spell as spell_router
@@ -101,6 +105,11 @@ tinymce.init({
             },
         ],
     )
+
+    # ── Rate limiting ──
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
 
     # ── GZip compression (helps large responses) ──
     app.add_middleware(GZipMiddleware, minimum_size=500)

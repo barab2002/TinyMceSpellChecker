@@ -219,6 +219,19 @@ class DictionaryResponse(BaseModel):
     }
 
 
+class DictionaryImportResponse(BaseModel):
+    added: int = Field(..., description="Number of new words added.", ge=0)
+    skipped: int = Field(..., description="Words already present (no-ops).", ge=0)
+    errors: List[dict] = Field(default_factory=list, description="Words that failed validation.")
+    total_words: int = Field(..., description="Total words in dictionary after import.", ge=0)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"added": 12, "skipped": 3, "errors": [], "total_words": 25}
+        }
+    }
+
+
 # ─── Health ───────────────────────────────────────────────────────────────────
 
 class HealthResponse(BaseModel):

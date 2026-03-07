@@ -124,6 +124,31 @@
       }
       return res.json(); // { words: [...], count: N }
     },
+
+    exportDictionary() {
+      // Trigger browser download — server sends Content-Disposition: attachment
+      const a = document.createElement('a');
+      a.href     = `${this._baseUrl}/dictionary/export`;
+      a.download = 'org_dictionary.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    },
+
+    async importDictionary(file) {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch(`${this._baseUrl}/dictionary/import`, {
+        method: 'POST',
+        body:   formData,
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`Import API error ${res.status}: ${body}`);
+      }
+      return res.json(); // { added, skipped, errors, total_words }
+    },
   };
 
   // ─── Text extraction ───────────────────────────────────────────────────────
@@ -273,7 +298,7 @@
       }, true);
     },
 
-    show(span, editor, onReplace) {
+    show(span, editor, onReplace, onIgnoreAll) {
       this._build();
       this.hide();
 
@@ -351,7 +376,13 @@
       el.appendChild(hr);
 
       // Actions
-      addRow('התעלם', () => { this._ignore(span); this.hide(); });
+      addRow('התעלם כאן', () => { this._ignore(span); this.hide(); });
+
+      addRow('התעלם בכל המסמך', () => {
+        this._removeWordHighlights(word, editor);
+        this.hide();
+        if (typeof onIgnoreAll === 'function') onIgnoreAll(word);
+      });
 
       addRow('הוסף למילון', async () => {
         try {
@@ -574,9 +605,71 @@
         padding:        '10px 16px',
         borderTop:      '1px solid #e5e7eb',
         display:        'flex',
-        justifyContent: 'flex-end',
+        justifyContent: 'space-between',
+        alignItems:     'center',
         flexShrink:     '0',
+        gap:            '8px',
       });
+
+      // Left side: import / export
+      const footerLeft = document.createElement('div');
+      Object.assign(footerLeft.style, { display: 'flex', gap: '6px' });
+
+      const _makeSecondaryBtn = (text) => {
+        const btn = document.createElement('button');
+        btn.textContent = text;
+        Object.assign(btn.style, {
+          padding:      '6px 12px',
+          background:   '#f3f4f6',
+          color:        '#374151',
+          border:       '1px solid #d1d5db',
+          borderRadius: '5px',
+          cursor:       'pointer',
+          fontSize:     '12px',
+        });
+        btn.addEventListener('mouseover', () => (btn.style.background = '#e5e7eb'));
+        btn.addEventListener('mouseout',  () => (btn.style.background = '#f3f4f6'));
+        return btn;
+      };
+
+      const exportBtn = _makeSecondaryBtn('ייצוא CSV ↓');
+      exportBtn.title = 'הורד את המילון כקובץ CSV';
+      exportBtn.addEventListener('click', () => {
+        Api.exportDictionary();
+        Notifier.show('מוריד קובץ CSV...', 'info');
+      });
+
+      // Hidden file input for import
+      const fileInput = document.createElement('input');
+      fileInput.type   = 'file';
+      fileInput.accept = '.csv,.txt,text/plain,text/csv';
+      Object.assign(fileInput.style, { display: 'none' });
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        fileInput.value = '';  // reset so same file can be re-imported
+        try {
+          const result = await Api.importDictionary(file);
+          await this._refresh();
+          Notifier.show(
+            `ייבוא הושלם: ${result.added} מילים נוספו, ${result.skipped} כבר קיימות`,
+            result.errors.length > 0 ? 'info' : 'success'
+          );
+        } catch (_err) {
+          Notifier.show('שגיאה בייבוא הקובץ — בדוק שהשרת פועל', 'error');
+        }
+      });
+      document.body.appendChild(fileInput);
+
+      const importBtn = _makeSecondaryBtn('ייבוא CSV ↑');
+      importBtn.title = 'טען מילים מקובץ CSV או טקסט';
+      importBtn.addEventListener('click', () => fileInput.click());
+
+      footerLeft.appendChild(importBtn);
+      footerLeft.appendChild(exportBtn);
+      footer.appendChild(footerLeft);
+
+      // Right side: close
       const closeFooterBtn = document.createElement('button');
       closeFooterBtn.textContent = 'סגור';
       Object.assign(closeFooterBtn.style, {
@@ -811,6 +904,9 @@
     const maxSug   = editor.options.get('hebrewspellcheck_max_suggestions');
     let   autoCheckEnabled = editor.options.get('hebrewspellcheck_auto_check');
 
+    // Words ignored for the lifetime of this editor session (not persisted)
+    const sessionIgnored = new Set();
+
     Api.init(apiUrl, language);
 
     // ── Register custom SVG icons ──
@@ -835,7 +931,10 @@
       if (target && target.classList && target.classList.contains(SPAN_CLASS)) {
         e.preventDefault();
         e.stopPropagation();
-        Popover.show(target, editor, () => runSpellCheck(false, true));
+        Popover.show(target, editor, () => runSpellCheck(false, true), (word) => {
+          sessionIgnored.add(word);
+          Notifier.show(`"${word}" יתעלם בכל המסמך לאורך הסשן`, 'info');
+        });
       } else {
         Popover.hide();
       }
@@ -874,12 +973,18 @@
       try {
         const result = await Api.checkText(plainText, maxSug);
 
+        // Filter out words the user chose to ignore for this session
+        const misspellings = (result.misspellings || []).filter((m) => {
+          const clean = m.word.replace(/[\u0591-\u05C7]/g, '');
+          return !sessionIgnored.has(m.word) && !sessionIgnored.has(clean);
+        });
+
         editor.undoManager.transact(() => {
-          applyHighlights(segments, result.misspellings || []);
+          applyHighlights(segments, misspellings);
         });
 
         if (!silent) {
-          const count = result.total || 0;
+          const count = misspellings.length;
           if (count === 0) {
             Notifier.show('לא נמצאו שגיאות איות ✓', 'success');
           } else {
@@ -948,6 +1053,12 @@
       tooltip: 'ניהול מילון הארגון',
       onAction: () => DictionaryManager.open(),
     });
+
+    // ── Keyboard shortcuts ──
+    // Alt+S  — run spell-check
+    // Alt+Shift+C — clear all highlights
+    editor.addShortcut('alt+s',       'בדיקת איות בעברית', () => runSpellCheck(true));
+    editor.addShortcut('alt+shift+c', 'נקה סימוני איות',   clearAllHighlights);
 
     // ── Menu items ──
 
