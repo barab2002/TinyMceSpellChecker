@@ -1,18 +1,30 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
-# spylls is pure Python — no system Hunspell library needed.
-
-WORKDIR /app
-
-# Install curl (needed to download latest dictionary) and clean up in one layer
+# Build-time tools needed to compile the hunspell C extension
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates && \
+    apt-get install -y --no-install-recommends \
+        build-essential pkg-config libhunspell-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies first (layer-cached until requirements.txt changes)
+WORKDIR /build
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM python:3.11-slim
+
+# Runtime only: libhunspell shared library + curl for dictionary download
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        curl ca-certificates libhunspell-1.7-0 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy compiled Python packages from builder
+COPY --from=builder /install /usr/local
+
+WORKDIR /app
 
 # Copy application code
 COPY app/ ./app/
@@ -23,10 +35,10 @@ COPY app/ ./app/
 COPY dictionaries/ ./dictionaries/
 
 RUN echo "Downloading latest he_IL dictionary from wooorm/dictionaries..." && \
-    curl -fsSL --retry 3 --retry-delay 2 \
+    curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
       "https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/he/index.aff" \
       -o /app/dictionaries/he_IL.aff && \
-    curl -fsSL --retry 3 --retry-delay 2 \
+    curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
       "https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/he/index.dic" \
       -o /app/dictionaries/he_IL.dic && \
     echo "Downloaded latest dictionary: $(wc -l < /app/dictionaries/he_IL.dic) words" || \
