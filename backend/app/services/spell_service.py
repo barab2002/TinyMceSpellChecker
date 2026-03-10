@@ -1,9 +1,12 @@
 """
-Spell-check service — Hebrew support via spylls (pure Python Hunspell).
+Spell-check service — Hebrew support via the hunspell C library bindings.
 
 Performance notes
 -----------------
-spylls.suggest() is the bottleneck: pure Python, ~50–200 ms per unknown word.
+The `hunspell` Python package wraps the native libhunspell C library via ctypes.
+This is substantially faster than a pure-Python reimplementation for both lookup
+and suggestion generation.
+
 Two caches are maintained for the lifetime of the process:
 
   _lookup_cache  – word → bool  (is it spelled correctly?)
@@ -60,19 +63,21 @@ class SpellService:
     def _init(self, dict_dir: str, language: str) -> None:
         lang_fs = language.replace("-", "_")
         base = Path(dict_dir) / lang_fs
+        dic_path = str(base) + ".dic"
+        aff_path = str(base) + ".aff"
 
-        if not Path(str(base) + ".aff").exists() or not Path(str(base) + ".dic").exists():
+        if not Path(dic_path).exists() or not Path(aff_path).exists():
             logger.error(
                 "Dictionary files not found: %s.aff / %s.dic", base, base
             )
             return
 
         try:
-            from spylls.hunspell import Dictionary
-            self._dic = Dictionary.from_files(str(base))
-            logger.info("spylls dictionary loaded: language=%s", lang_fs)
+            import hunspell  # type: ignore[import-untyped]
+            self._dic = hunspell.HunSpell(dic_path, aff_path)
+            logger.info("hunspell dictionary loaded: language=%s", lang_fs)
         except Exception as exc:
-            logger.error("Failed to load spylls dictionary: %s", exc)
+            logger.error("Failed to load hunspell dictionary: %s", exc)
 
     # ------------------------------------------------------------------
     # Public API
@@ -93,7 +98,7 @@ class SpellService:
             return self._lookup_cache[clean]
 
         try:
-            result = bool(self._dic.lookup(clean))
+            result = bool(self._dic.spell(clean))
         except Exception:
             result = True  # fail open
 
@@ -111,7 +116,7 @@ class SpellService:
             return self._suggest_cache[cache_key]
 
         try:
-            suggestions = list(self._dic.suggest(clean))[:max_n]
+            suggestions = self._dic.suggest(clean)[:max_n]
         except Exception as exc:
             logger.warning("suggest(%r) failed: %s", word, exc)
             suggestions = []

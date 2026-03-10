@@ -1,12 +1,13 @@
 FROM python:3.11-slim
 
-# spylls is pure Python — no system Hunspell library needed.
+# hunspell Python bindings require libhunspell shared library at runtime.
 
 WORKDIR /app
 
-# Install curl (needed to download latest dictionary) and clean up in one layer
+# Install system deps: libhunspell-dev (C library + headers), curl for dict download
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates && \
+    apt-get install -y --no-install-recommends \
+        curl ca-certificates libhunspell-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first (layer-cached until requirements.txt changes)
