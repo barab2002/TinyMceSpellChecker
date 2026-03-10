@@ -27,6 +27,7 @@ from .models.schemas import HealthResponse
 from .routes import dictionary as dict_router
 from .routes import spell as spell_router
 from .services.dictionary_service import DictionaryService
+from .services.redis_service import RedisService
 from .services.spell_service import SpellService
 
 
@@ -128,10 +129,21 @@ tinymce.init({
         max_age=3600,
     )
 
+    # ── Redis (connect + pre-load dictionary) ──
+    redis_svc = RedisService()
+    redis_svc.connect(settings.redis_url)
+    if redis_svc.is_available():
+        dic_file = (
+            f"{settings.hunspell_dict_dir}/{settings.default_language.replace('-', '_')}.dic"
+        )
+        redis_svc.load_dictionary(dic_file, settings.default_language.replace("-", "_"))
+    app.state.redis_service = redis_svc
+
     # ── Services (singletons on app.state) ──
     app.state.spell_service = SpellService(
         dict_dir=settings.hunspell_dict_dir,
         language=settings.default_language,
+        redis_svc=redis_svc,
     )
     app.state.dict_service = DictionaryService(
         dict_path=settings.custom_dict_path
@@ -159,13 +171,17 @@ tinymce.init({
         ),
     )
     async def health(req: Request) -> HealthResponse:
-        spell_svc: SpellService      = req.app.state.spell_service
-        dict_svc:  DictionaryService = req.app.state.dict_service
+        spell_svc:  SpellService      = req.app.state.spell_service
+        dict_svc:   DictionaryService = req.app.state.dict_service
+        redis_svc:  RedisService      = req.app.state.redis_service
+        lang_key = settings.default_language.replace("-", "_")
         return HealthResponse(
             status="ok",
             hunspell_available=spell_svc.is_available(),
             language=settings.default_language,
             custom_dict_words=dict_svc.count(),
+            redis_available=redis_svc.is_available(),
+            redis_dict_words=redis_svc.dict_size(lang_key),
         )
 
     @app.get("/", tags=["System"], include_in_schema=False)
@@ -173,9 +189,10 @@ tinymce.init({
         return {"message": "Hebrew Spell-Check API — Swagger UI at /docs"}
 
     logger.info(
-        "Startup complete | spell_engine=%s | lang=%s | cors=%s",
+        "Startup complete | spell_engine=%s | lang=%s | redis=%s | cors=%s",
         app.state.spell_service.is_available(),
         settings.default_language,
+        app.state.redis_service.is_available(),
         settings.cors_origins_list,
     )
 

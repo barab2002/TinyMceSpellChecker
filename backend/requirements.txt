@@ -7,3 +7,4 @@ pydantic-settings==2.7.1
 python-json-logger==3.2.1
 orjson==3.10.12
 slowapi==0.1.9
+redis[hiredis]==5.2.1
