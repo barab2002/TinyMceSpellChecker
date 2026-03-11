@@ -211,58 +211,65 @@
     });
   }
 
-  function wrapTextNodeRange(textNode, localStart, localEnd, word, suggestions) {
-    const doc    = textNode.ownerDocument;
-    const text   = textNode.textContent;
-    const before = text.slice(0, localStart);
-    const middle = text.slice(localStart, localEnd);
-    const after  = text.slice(localEnd);
-
-    const span = doc.createElement('span');
-    span.className            = SPAN_CLASS;
-    span.textContent          = middle;
-    span.dataset.word         = word;
-    span.dataset.suggestions  = JSON.stringify(suggestions);
-
-    const parent = textNode.parentNode;
-
-    if (before) parent.insertBefore(doc.createTextNode(before), textNode);
-    parent.insertBefore(span, textNode);
-
-    if (after) {
-      textNode.textContent = after;
-    } else {
-      parent.removeChild(textNode);
-    }
-
-    return span;
-  }
-
   function applyHighlights(segments, misspellings) {
-    const sorted = [...misspellings].sort((a, b) => b.start - a.start);
+  // 1. Group misspellings by the segment they belong to
+  const segmentMap = new Map();
 
-    for (const miss of sorted) {
-      const { word, start: mStart, end: mEnd, suggestions } = miss;
+  for (const miss of misspellings) {
+    const seg = segments.find(
+      (s) => s.start <= miss.start && s.end >= miss.end
+    );
+    if (!seg) continue;
 
-      const seg = segments.find(
-        (s) => !s.wrapped && s.start <= mStart && s.end >= mEnd
-      );
-      if (!seg) continue;
-
-      const localStart = mStart - seg.start;
-      const localEnd   = mEnd   - seg.start;
-
-      const nodeText   = seg.node.textContent;
-      const slice      = nodeText.slice(localStart, localEnd);
-      const sliceClean = slice.replace(/[\u0591-\u05C7]/g, '');
-      if (slice !== word && sliceClean !== word) continue;
-
-      wrapTextNodeRange(seg.node, localStart, localEnd, word, suggestions || []);
-
-      const suffixLen = nodeText.length - localEnd;
-      seg.start = suffixLen > 0 ? mEnd : seg.end;
-    }
+    if (!segmentMap.has(seg)) segmentMap.set(seg, []);
+    segmentMap.get(seg).push(miss);
   }
+
+  // 2. Process each segment that has misspellings
+  for (const [seg, misses] of segmentMap) {
+    // Sort misspellings by start position (ascending)
+    misses.sort((a, b) => a.start - b.start);
+
+    const fragment = document.createDocumentFragment();
+    let lastIndex = 0;
+    const fullText = seg.node.textContent;
+
+    for (const miss of misses) {
+      const localStart = miss.start - seg.start;
+      const localEnd = miss.end - seg.start;
+
+      // Add the plain text before the misspelling
+      if (localStart > lastIndex) {
+        fragment.appendChild(
+          document.createTextNode(fullText.slice(lastIndex, localStart))
+        );
+      }
+
+      // Add the highlighted span
+      const span = document.createElement('span');
+      span.className = SPAN_CLASS;
+      span.textContent = fullText.slice(localStart, localEnd);
+      span.dataset.word = miss.word;
+      span.dataset.suggestions = JSON.stringify(miss.suggestions || []);
+      fragment.appendChild(span);
+
+      lastIndex = localEnd;
+    }
+
+    // Add any remaining text after the last misspelling
+    if (lastIndex < fullText.length) {
+      fragment.appendChild(
+        document.createTextNode(fullText.slice(lastIndex))
+      );
+    }
+
+    // 3. Replace the old node with the new content
+    seg.node.parentNode.replaceChild(fragment, seg.node);
+    
+    // Mark as wrapped to prevent double-processing
+    seg.wrapped = true; 
+  }
+}
 
   // ─── Suggestion popover ────────────────────────────────────────────────────
 
