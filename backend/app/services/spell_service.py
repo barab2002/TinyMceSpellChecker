@@ -65,7 +65,12 @@ logger = logging.getLogger(__name__)
 _HE_LETTERS  = "\u05D0-\u05EA\u05F0-\u05F4\uFB1D-\uFB4E"
 _HE_MARKS    = "\u0591-\u05C7"
 _HE_TOKEN_RE = re.compile(
-    rf"[{_HE_LETTERS}{_HE_MARKS}]*[{_HE_LETTERS}][{_HE_LETTERS}{_HE_MARKS}]*"
+    # Core: one or more Hebrew letters/marks
+    # Optionally followed by (ASCII ' or " or Unicode geresh/gershayim) then more Hebrew chars.
+    # This keeps abbreviations like צה"ל and ד'ר as single tokens instead of
+    # splitting them at the quote character.
+    rf"[{_HE_LETTERS}{_HE_MARKS}]+"
+    rf"(?:['\"\u05F3\u05F4][{_HE_LETTERS}{_HE_MARKS}]+)*"
 )
 _MAQAF = "\u05BE"
 
@@ -86,6 +91,19 @@ _HE_PREFIXES: Tuple[str, ...] = (
 def _strip_nikud(word: str) -> str:
     """Remove nikud and cantillation marks, leaving only base letters."""
     return re.sub(rf"[{_HE_MARKS}]", "", word)
+
+
+def _normalize_inner_quotes(word: str) -> str:
+    """
+    Replace ASCII apostrophe (') and double-quote (") with the proper Hebrew
+    geresh (U+05F3) and gershayim (U+05F4) punctuation marks.
+
+    Hebrew abbreviations like ד"ר (doctor) and צה"ל (IDF) are commonly typed
+    with ASCII quote characters, but Hunspell dictionaries store them with the
+    canonical Unicode punctuation.  Normalising before lookup prevents false
+    positives for correctly-spelled abbreviations.
+    """
+    return word.replace('"', "\u05F4").replace("'", "\u05F3")
 
 
 def _prefix_bases(word: str) -> Iterator[Tuple[str, str]]:
@@ -190,6 +208,12 @@ class SpellService:
         clean = _strip_nikud(word)
         if not clean:
             return True
+
+        # Normalise ASCII ' / " to Hebrew geresh/gershayim so that abbreviations
+        # like צה"ל typed with a regular keyboard quote look up correctly in the
+        # Hunspell dictionary (which uses the Unicode punctuation marks).
+        if "'" in clean or '"' in clean:
+            clean = _normalize_inner_quotes(clean)
 
         if clean in self._lookup_cache:
             return self._lookup_cache[clean]
