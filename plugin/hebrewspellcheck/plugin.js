@@ -384,16 +384,18 @@
         if (typeof onIgnoreAll === 'function') onIgnoreAll(word);
       });
 
-      addRow('הוסף למילון', async () => {
-        try {
-          await Api.addToDictionary(word);
-          this._removeWordHighlights(word, editor);
-          this.hide();
-          Notifier.show('המילה נוספה למילון בהצלחה ✓', 'success');
-        } catch (err) {
-          Notifier.show('שגיאה בהוספה למילון — בדוק שהשרת פועל', 'error');
-        }
-      });
+      if (GrowthBook.canAddToDict()) {
+        addRow('הוסף למילון', async () => {
+          try {
+            await Api.addToDictionary(word);
+            this._removeWordHighlights(word, editor);
+            this.hide();
+            Notifier.show('המילה נוספה למילון בהצלחה ✓', 'success');
+          } catch (err) {
+            Notifier.show('שגיאה בהוספה למילון — בדוק שהשרת פועל', 'error');
+          }
+        });
+      }
 
       this._position(span, editor);
     },
@@ -542,52 +544,54 @@
       header.appendChild(closeBtn);
       el.appendChild(header);
 
-      // ── Add-word section ──
-      const addSection = document.createElement('div');
-      Object.assign(addSection.style, {
-        display:      'flex',
-        gap:          '8px',
-        padding:      '12px 16px',
-        borderBottom: '1px solid #e5e7eb',
-        flexShrink:   '0',
-      });
-      const input = document.createElement('input');
-      input.type        = 'text';
-      input.placeholder = 'הוסף מילה חדשה...';
-      Object.assign(input.style, {
-        flex:         '1',
-        padding:      '7px 10px',
-        border:       '1px solid #d1d5db',
-        borderRadius: '5px',
-        fontSize:     '13px',
-        direction:    'rtl',
-        outline:      'none',
-      });
-      input.addEventListener('focus', () => (input.style.borderColor = '#2563eb'));
-      input.addEventListener('blur',  () => (input.style.borderColor = '#d1d5db'));
-      this._addInput = input;
+      // ── Add-word section (hidden when GrowthBook disables the feature) ──
+      if (GrowthBook.canAddToDict()) {
+        const addSection = document.createElement('div');
+        Object.assign(addSection.style, {
+          display:      'flex',
+          gap:          '8px',
+          padding:      '12px 16px',
+          borderBottom: '1px solid #e5e7eb',
+          flexShrink:   '0',
+        });
+        const input = document.createElement('input');
+        input.type        = 'text';
+        input.placeholder = 'הוסף מילה חדשה...';
+        Object.assign(input.style, {
+          flex:         '1',
+          padding:      '7px 10px',
+          border:       '1px solid #d1d5db',
+          borderRadius: '5px',
+          fontSize:     '13px',
+          direction:    'rtl',
+          outline:      'none',
+        });
+        input.addEventListener('focus', () => (input.style.borderColor = '#2563eb'));
+        input.addEventListener('blur',  () => (input.style.borderColor = '#d1d5db'));
+        this._addInput = input;
 
-      const addBtn = document.createElement('button');
-      addBtn.textContent = 'הוסף';
-      Object.assign(addBtn.style, {
-        padding:      '7px 16px',
-        background:   '#2563eb',
-        color:        '#fff',
-        border:       'none',
-        borderRadius: '5px',
-        cursor:       'pointer',
-        fontSize:     '13px',
-        fontWeight:   '600',
-        flexShrink:   '0',
-      });
-      addBtn.addEventListener('mouseover', () => (addBtn.style.background = '#1d4ed8'));
-      addBtn.addEventListener('mouseout',  () => (addBtn.style.background = '#2563eb'));
-      addBtn.addEventListener('click', () => this._addWord());
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') this._addWord(); });
+        const addBtn = document.createElement('button');
+        addBtn.textContent = 'הוסף';
+        Object.assign(addBtn.style, {
+          padding:      '7px 16px',
+          background:   '#2563eb',
+          color:        '#fff',
+          border:       'none',
+          borderRadius: '5px',
+          cursor:       'pointer',
+          fontSize:     '13px',
+          fontWeight:   '600',
+          flexShrink:   '0',
+        });
+        addBtn.addEventListener('mouseover', () => (addBtn.style.background = '#1d4ed8'));
+        addBtn.addEventListener('mouseout',  () => (addBtn.style.background = '#2563eb'));
+        addBtn.addEventListener('click', () => this._addWord());
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') this._addWord(); });
 
-      addSection.appendChild(input);
-      addSection.appendChild(addBtn);
-      el.appendChild(addSection);
+        addSection.appendChild(input);
+        addSection.appendChild(addBtn);
+        el.appendChild(addSection);
+      }
 
       // ── Word list ──
       const listContainer = document.createElement('div');
@@ -689,8 +693,10 @@
     async open() {
       this._build();
       this._overlay.style.display = 'block';
-      this._addInput.value = '';
-      this._addInput.focus();
+      if (this._addInput) {
+        this._addInput.value = '';
+        this._addInput.focus();
+      }
       await this._refresh();
     },
 
@@ -876,6 +882,53 @@
       '</svg>',
   };
 
+  // ─── GrowthBook feature-flag client ────────────────────────────────────────
+  //
+  // Queries the GrowthBook Features API to decide whether the "Add to
+  // dictionary" action should be visible.  Defaults to *enabled* (fail-open)
+  // if GrowthBook is not configured or the network call fails.
+  //
+  // Config options (passed via tinymce.init):
+  //   hebrewspellcheck_growthbook_client_key  — GrowthBook SDK client key
+  //   hebrewspellcheck_growthbook_feature_key — feature flag name to check
+  //       (default: "hebrew-spellcheck-add-to-dictionary")
+  //   hebrewspellcheck_growthbook_api_url     — base URL for the Features API
+  //       (default: "https://cdn.growthbook.io/api/features")
+
+  const GrowthBook = {
+    _addToDictEnabled: true, // default: enabled (fail-open)
+
+    /**
+     * Fetch the feature flags from GrowthBook and cache whether
+     * "add to dictionary" is enabled.  Safe to call without await;
+     * the flag stays true (enabled) until the request resolves.
+     *
+     * @param {string} clientKey  - GrowthBook SDK client key
+     * @param {string} featureKey - the feature flag name to check
+     * @param {string} apiUrl     - base URL (without trailing slash)
+     */
+    async init(clientKey, featureKey, apiUrl) {
+      if (!clientKey) return; // not configured — leave default (enabled)
+      try {
+        const url = `${apiUrl}/${encodeURIComponent(clientKey)}`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        if (!res.ok) return;
+        const data = await res.json();
+        const feature = (data.features || {})[featureKey];
+        if (feature && typeof feature.defaultValue !== 'undefined') {
+          this._addToDictEnabled = feature.defaultValue !== false;
+        }
+      } catch (_err) {
+        // Network error or timeout — keep default (enabled / fail-open)
+      }
+    },
+
+    /** Returns true when "add to dictionary" should be shown. */
+    canAddToDict() {
+      return this._addToDictEnabled;
+    },
+  };
+
   // ─── Plugin registration ───────────────────────────────────────────────────
 
   tinymce.PluginManager.add(PLUGIN_NAME, function (editor) {
@@ -897,12 +950,31 @@
       processor: 'boolean',
       default:   false,
     });
+    editor.options.register('hebrewspellcheck_growthbook_client_key', {
+      processor: 'string',
+      default:   '',
+    });
+    editor.options.register('hebrewspellcheck_growthbook_feature_key', {
+      processor: 'string',
+      default:   'hebrew-spellcheck-add-to-dictionary',
+    });
+    editor.options.register('hebrewspellcheck_growthbook_api_url', {
+      processor: 'string',
+      default:   'https://cdn.growthbook.io/api/features',
+    });
 
     // ── STEP 2: Read options ──
     const apiUrl   = editor.options.get('hebrewspellcheck_api_url');
     const language = editor.options.get('hebrewspellcheck_language');
     const maxSug   = editor.options.get('hebrewspellcheck_max_suggestions');
     let   autoCheckEnabled = editor.options.get('hebrewspellcheck_auto_check');
+
+    // ── GrowthBook: fetch feature flags async (fail-open if unreachable) ──
+    GrowthBook.init(
+      editor.options.get('hebrewspellcheck_growthbook_client_key'),
+      editor.options.get('hebrewspellcheck_growthbook_feature_key'),
+      editor.options.get('hebrewspellcheck_growthbook_api_url'),
+    ).catch(() => {});
 
     // Words ignored for the lifetime of this editor session (not persisted)
     const sessionIgnored = new Set();
