@@ -359,6 +359,17 @@ class SpellService:
                     cache_key = (_strip_nikud(word), max_suggestions)
                     suggestions = self._suggest_cache.get(cache_key, [])
 
+                # If every suggestion is just the canonical Unicode form of the
+                # input (e.g. ASCII apostrophe → Hebrew geresh U+05F3), the word
+                # is effectively correct — the user typed a keyboard-accessible
+                # variant.  Example: ג'ודו → suggestion ג׳ודו → same word, skip.
+                word_norm = _normalize_inner_quotes(clean)
+                if suggestions and any(
+                    _normalize_inner_quotes(_strip_nikud(s)) == word_norm
+                    for s in suggestions
+                ):
+                    continue
+
                 misspellings.append(
                     {"word": word, "start": start, "end": end,
                      "suggestions": suggestions, "source": "hunspell"}
