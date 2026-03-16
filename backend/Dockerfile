@@ -55,6 +55,17 @@ RUN echo "Downloading en_US dictionary..." && \
     echo "en_US ready: $(wc -l < /app/dictionaries/en_US.dic) words" || \
     echo "en_US download failed — English spell-check will be unavailable"
 
+# Arabic dictionary — downloaded at build time
+RUN echo "Downloading Arabic (ar) dictionary..." && \
+    curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
+      "https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/ar/index.aff" \
+      -o /app/dictionaries/ar.aff && \
+    curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
+      "https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/ar/index.dic" \
+      -o /app/dictionaries/ar.dic && \
+    echo "ar ready: $(wc -l < /app/dictionaries/ar.dic) words" || \
+    echo "ar download failed — Arabic spell-check will be unavailable"
+
 # Create logs directory and a non-root user
 RUN mkdir -p /app/logs && \
     useradd -m appuser && \

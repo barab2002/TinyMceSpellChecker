@@ -78,7 +78,8 @@ class SpellCheckRequest(BaseModel):
     @classmethod
     def language_allowed(cls, v: str) -> str:
         # Whitelist prevents path-traversal attacks on dictionary file names
-        allowed = {"he-IL", "he_IL", "en-US", "en_US", "en-GB", "en_GB"}
+        allowed = {"he-IL", "he_IL", "en-US", "en_US", "en-GB", "en_GB",
+                   "ar", "ar-SA", "ar_SA"}
         if v not in allowed:
             raise ValueError(
                 f"Unsupported language: {v!r}. "

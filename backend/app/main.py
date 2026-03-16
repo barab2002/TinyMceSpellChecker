@@ -159,11 +159,18 @@ tinymce.init({
             spell_services[lang] = svc
             logger.info("Spell service ready: lang=%s", lang)
 
-    # Normalised aliases so both "he-IL" and "he_IL" resolve to the same service
+    # Normalised aliases so both "he-IL" / "he_IL" and "ar-SA" / "ar_SA" all
+    # resolve to the same service.
+    _ALIASES: dict = {"ar": ["ar-SA", "ar_SA"]}
     for lang in list(spell_services):
-        alias = lang.replace("_", "-")
+        # underscore ↔ hyphen twin
+        alias = lang.replace("_", "-") if "_" in lang else lang.replace("-", "_")
         if alias not in spell_services:
             spell_services[alias] = spell_services[lang]
+        # language-specific extra aliases
+        for extra in _ALIASES.get(lang, []):
+            if extra not in spell_services:
+                spell_services[extra] = spell_services[lang]
 
     app.state.spell_services = spell_services
     # Backward-compatible single reference (Hebrew, or first available)

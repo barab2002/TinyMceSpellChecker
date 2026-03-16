@@ -187,6 +187,20 @@ class SpellService:
             self._token_re = _HE_TOKEN_RE
             self._strip_diacritics = _strip_nikud
             self._he_mode = True
+        elif lang.startswith("ar"):
+            # Arabic Unicode block + extended Arabic supplement/presentation forms
+            _AR = r"\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF"
+            # Arabic tashkeel (harakat / diacritics) — stripped before lookup
+            _AR_DIACR = (
+                r"\u0610-\u061A"   # Arabic signs
+                r"\u064B-\u065F"   # Fathah … Shadda (most common harakat)
+                r"\u0670"          # Superscript alef
+                r"\u06D6-\u06ED"   # Small letters / koranic annotation signs
+            )
+            self._token_re = re.compile(rf"[{_AR}]{{2,}}")
+            _ar_diacr_re = re.compile(rf"[{_AR_DIACR}]")
+            self._strip_diacritics = lambda w, _re=_ar_diacr_re: _re.sub("", w)
+            self._he_mode = False
         elif lang.startswith(("en", "fr", "de", "es", "pt", "nl", "it", "pl")):
             # Latin scripts: word chars + optional mid-word apostrophe (contractions)
             self._token_re = re.compile(
