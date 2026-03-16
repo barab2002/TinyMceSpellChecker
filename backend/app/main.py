@@ -129,22 +129,49 @@ tinymce.init({
         max_age=3600,
     )
 
-    # ── Redis (connect + pre-load dictionary) ──
+    # ── Redis (connect + pre-load Hebrew dictionary) ──
     redis_svc = RedisService()
     redis_svc.connect(settings.redis_url)
     if redis_svc.is_available():
-        dic_file = (
-            f"{settings.hunspell_dict_dir}/{settings.default_language.replace('-', '_')}.dic"
-        )
-        redis_svc.load_dictionary(dic_file, settings.default_language.replace("-", "_"))
+        he_key = settings.default_language.replace("-", "_")
+        dic_file = f"{settings.hunspell_dict_dir}/{he_key}.dic"
+        redis_svc.load_dictionary(dic_file, he_key)
     app.state.redis_service = redis_svc
 
-    # ── Services (singletons on app.state) ──
-    app.state.spell_service = SpellService(
-        dict_dir=settings.hunspell_dict_dir,
-        language=settings.default_language,
-        redis_svc=redis_svc,
+    # ── Spell services — one per discovered language ──
+    # Auto-discovers every language that has both .dic and .aff files in the
+    # dictionary directory (e.g. he_IL, en_US, ar, …).
+    from pathlib import Path as _Path
+    dict_dir = _Path(settings.hunspell_dict_dir)
+    spell_services: dict = {}
+    for aff_file in sorted(dict_dir.glob("*.aff")):
+        lang = aff_file.stem  # "he_IL", "en_US", …
+        dic_file = aff_file.with_suffix(".dic")
+        if not dic_file.exists():
+            continue
+        svc = SpellService(
+            dict_dir=settings.hunspell_dict_dir,
+            language=lang,
+            # Pass Redis only for the default (Hebrew) language for now
+            redis_svc=redis_svc if lang == settings.default_language.replace("-", "_") else None,
+        )
+        if svc.is_available():
+            spell_services[lang] = svc
+            logger.info("Spell service ready: lang=%s", lang)
+
+    # Normalised aliases so both "he-IL" and "he_IL" resolve to the same service
+    for lang in list(spell_services):
+        alias = lang.replace("_", "-")
+        if alias not in spell_services:
+            spell_services[alias] = spell_services[lang]
+
+    app.state.spell_services = spell_services
+    # Backward-compatible single reference (Hebrew, or first available)
+    default_lang = settings.default_language.replace("-", "_")
+    app.state.spell_service = spell_services.get(
+        default_lang, next(iter(spell_services.values()), None)
     )
+
     app.state.dict_service = DictionaryService(
         dict_path=settings.custom_dict_path
     )
@@ -189,9 +216,8 @@ tinymce.init({
         return {"message": "Hebrew Spell-Check API — Swagger UI at /docs"}
 
     logger.info(
-        "Startup complete | spell_engine=%s | lang=%s | redis=%s | cors=%s",
-        app.state.spell_service.is_available(),
-        settings.default_language,
+        "Startup complete | languages=%s | redis=%s | cors=%s",
+        sorted(k for k in spell_services if "_" in k),  # canonical keys only
         app.state.redis_service.is_available(),
         settings.cors_origins_list,
     )

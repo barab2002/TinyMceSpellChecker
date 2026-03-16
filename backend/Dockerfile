@@ -44,6 +44,17 @@ RUN echo "Downloading latest he_IL dictionary from wooorm/dictionaries..." && \
     echo "Downloaded latest dictionary: $(wc -l < /app/dictionaries/he_IL.dic) words" || \
     echo "Download failed — using bundled dictionary ($(wc -l < /app/dictionaries/he_IL.dic) words)"
 
+# English dictionary (en_US) — downloaded at build time, no bundled fallback
+RUN echo "Downloading en_US dictionary..." && \
+    curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
+      "https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en/index.aff" \
+      -o /app/dictionaries/en_US.aff && \
+    curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
+      "https://raw.githubusercontent.com/wooorm/dictionaries/main/dictionaries/en/index.dic" \
+      -o /app/dictionaries/en_US.dic && \
+    echo "en_US ready: $(wc -l < /app/dictionaries/en_US.dic) words" || \
+    echo "en_US download failed — English spell-check will be unavailable"
+
 # Create logs directory and a non-root user
 RUN mkdir -p /app/logs && \
     useradd -m appuser && \

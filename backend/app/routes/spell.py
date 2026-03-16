@@ -63,8 +63,13 @@ even if Hunspell flags them. Add product names, acronyms, and customer names the
 )
 @limiter.limit("120/minute")
 async def check_spelling(request: Request, request_body: SpellCheckRequest):
-    spell_service = request.app.state.spell_service
-    dict_service  = request.app.state.dict_service
+    # Select the spell service for the requested language.
+    # Falls back to the default (Hebrew) service if the language is not loaded.
+    lang_key = request_body.language.replace("-", "_")
+    spell_service = request.app.state.spell_services.get(
+        lang_key, request.app.state.spell_service
+    )
+    dict_service = request.app.state.dict_service
 
     from ..config import settings
     if len(request_body.text) > settings.max_text_length:

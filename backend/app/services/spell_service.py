@@ -167,7 +167,38 @@ class SpellService:
         # Cross-request caches — populated on first encounter, reused forever
         self._lookup_cache: Dict[str, bool] = {}
         self._suggest_cache: Dict[Tuple[str, int], List[str]] = {}
+        self._init_tokenizer(language)
         self._init(dict_dir, language)
+
+    def _init_tokenizer(self, language: str) -> None:
+        """
+        Configure the tokeniser and diacritic-stripping function for the
+        given language script.
+
+        Hebrew / Yiddish  — Hebrew Unicode block + nikud stripping + maqaf
+                            splitting + proclitic prefix logic.
+        Latin (en, fr …)  — basic word regex that includes mid-word apostrophes
+                            for contractions like "don't" and "it's".
+        Other             — identity tokeniser (no-op strip, simple word split).
+        """
+        lang = language.replace("-", "_").lower()
+
+        if lang.startswith("he") or lang.startswith("yi"):
+            self._token_re = _HE_TOKEN_RE
+            self._strip_diacritics = _strip_nikud
+            self._he_mode = True
+        elif lang.startswith(("en", "fr", "de", "es", "pt", "nl", "it", "pl")):
+            # Latin scripts: word chars + optional mid-word apostrophe (contractions)
+            self._token_re = re.compile(
+                r"[A-Za-z\u00C0-\u024F]+(?:'[A-Za-z\u00C0-\u024F]+)*"
+            )
+            self._strip_diacritics = lambda w: w  # keep accented chars for hunspell
+            self._he_mode = False
+        else:
+            # Generic fallback: match any run of non-whitespace/non-punctuation chars
+            self._token_re = re.compile(r"\S{2,}")
+            self._strip_diacritics = lambda w: w
+            self._he_mode = False
 
     def _init(self, dict_dir: str, language: str) -> None:
         lang_fs = language.replace("-", "_")
@@ -205,14 +236,12 @@ class SpellService:
         """
         if not self._dic:
             return True
-        clean = _strip_nikud(word)
+        clean = self._strip_diacritics(word)
         if not clean:
             return True
 
-        # Normalise ASCII ' / " to Hebrew geresh/gershayim so that abbreviations
-        # like צה"ל typed with a regular keyboard quote look up correctly in the
-        # Hunspell dictionary (which uses the Unicode punctuation marks).
-        if "'" in clean or '"' in clean:
+        # Hebrew: normalise ASCII ' / " to geresh/gershayim for dictionary lookup
+        if self._he_mode and ("'" in clean or '"' in clean):
             clean = _normalize_inner_quotes(clean)
 
         if clean in self._lookup_cache:
@@ -228,8 +257,8 @@ class SpellService:
         except Exception:
             result = True  # fail open
 
-        # Prefix fallback: "ובמחשב" should not be flagged
-        if not result:
+        # Hebrew only: prefix fallback ("ובמחשב" should not be flagged)
+        if not result and self._he_mode:
             result = _is_correct_with_prefix(clean, self._dic, depth=2)
 
         self._lookup_cache[clean] = result
@@ -245,7 +274,9 @@ class SpellService:
         """
         if not self._dic:
             return []
-        clean = _strip_nikud(word)
+        clean = self._strip_diacritics(word)
+        if self._he_mode and ("'" in clean or '"' in clean):
+            clean = _normalize_inner_quotes(clean)
         cache_key = (clean, max_n)
 
         if cache_key in self._suggest_cache:
@@ -257,10 +288,8 @@ class SpellService:
         except Exception as exc:
             logger.warning("suggest(%r) failed: %s", word, exc)
 
-        # No direct suggestions → try suggestions for the prefix-stripped base
-        # and prepend the prefix back so the correction preserves the sentence
-        # context (e.g. "ו" + "מחשוב" instead of bare "מחשוב").
-        if not suggestions:
+        # Hebrew only: prefix-reconstructed suggestions (ו + מחשוב → ומחשוב)
+        if not suggestions and self._he_mode:
             for prefix, base in _prefix_bases(clean):
                 try:
                     base_sugs = self._dic.suggest(base)[:max_n]
@@ -296,19 +325,20 @@ class SpellService:
         """
         tokens: List[Tuple[str, int, int]] = []
 
-        for m in _HE_TOKEN_RE.finditer(text):
+        for m in self._token_re.finditer(text):
             raw_word  = m.group()
             raw_start = m.start()
 
-            if _MAQAF in raw_word:
+            # Hebrew: split maqaf-joined words (e.g. בית-ספר → בית + ספר)
+            if self._he_mode and _MAQAF in raw_word:
                 cursor = raw_start
                 for part in raw_word.split(_MAQAF):
                     part_end = cursor + len(part)
-                    if len(_strip_nikud(part)) >= 2:
+                    if len(self._strip_diacritics(part)) >= 2:
                         tokens.append((part, cursor, part_end))
                     cursor = part_end + 1  # +1 for the maqaf character itself
             else:
-                if len(_strip_nikud(raw_word)) >= 2:
+                if len(self._strip_diacritics(raw_word)) >= 2:
                     tokens.append((raw_word, raw_start, m.end()))
 
         return tokens
@@ -339,11 +369,15 @@ class SpellService:
         seen_clean: set = set()
 
         for word, start, end in tokens:
-            clean = _strip_nikud(word)
+            clean = self._strip_diacritics(word)
 
-            # Organisational dictionary has highest priority (prefix-aware)
-            if _org_dict_match(clean, custom_dict):
-                continue
+            # Organisational dictionary — prefix-aware for Hebrew, exact for others
+            if self._he_mode:
+                if _org_dict_match(clean, custom_dict):
+                    continue
+            else:
+                if custom_dict.contains(clean):
+                    continue
 
             is_correct = self.check_word(word)
 
@@ -364,8 +398,8 @@ class SpellService:
                 # is effectively correct — the user typed a keyboard-accessible
                 # variant.  Example: ג'ודו → suggestion ג׳ודו → same word, skip.
                 word_norm = _normalize_inner_quotes(clean)
-                if suggestions and any(
-                    _normalize_inner_quotes(_strip_nikud(s)) == word_norm
+                if self._he_mode and suggestions and any(
+                    _normalize_inner_quotes(self._strip_diacritics(s)) == word_norm
                     for s in suggestions
                 ):
                     continue
