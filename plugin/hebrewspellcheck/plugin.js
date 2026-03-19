@@ -932,7 +932,7 @@ if (typeof AbortSignal.timeout !== 'function') {
     });
     editor.options.register('hebrewspellcheck_logger', {
       processor: 'object',
-      default:   null,
+      default:   {},
     });
 
     // ── STEP 2: Read options ──
