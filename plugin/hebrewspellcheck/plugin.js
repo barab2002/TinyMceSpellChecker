@@ -1062,13 +1062,19 @@ if (typeof AbortSignal.timeout !== 'function') {
     editor.ui.registry.addButton('hebrewspellcheck', {
       icon:    'hsc-check',
       tooltip: 'בדיקת איות בעברית',
-      onAction: () => runSpellCheck(true),
+      onAction: () => {
+        safeLog('click_spellcheck_button', {});
+        runSpellCheck(true);
+      },
     });
 
     editor.ui.registry.addButton('hebrewspellcheck_clear', {
       icon:    'hsc-clear',
       tooltip: 'נקה סימוני איות',
-      onAction: clearAllHighlights,
+      onAction: () => {
+        safeLog('click_clear_button', {});
+        clearAllHighlights();
+      },
     });
 
     // Toggle button — stays "pressed" (highlighted) while auto-check is active
@@ -1082,6 +1088,7 @@ if (typeof AbortSignal.timeout !== 'function') {
       onAction: (api) => {
         autoCheckEnabled = !autoCheckEnabled;
         api.setActive(autoCheckEnabled);
+        safeLog('click_toggle_auto', { enabled: autoCheckEnabled });
         Notifier.show(
           autoCheckEnabled ? 'בדיקת איות אוטומטית הופעלה' : 'בדיקת איות אוטומטית כובתה',
           'info'
@@ -1094,7 +1101,10 @@ if (typeof AbortSignal.timeout !== 'function') {
     editor.ui.registry.addButton('hebrewspellcheck_dictionary', {
       icon:    'hsc-dict',
       tooltip: 'ניהול מילון הארגון',
-      onAction: () => DictionaryManager.open(),
+      onAction: () => {
+        safeLog('click_dictionary_button', {});
+        DictionaryManager.open();
+      },
     });
 
     // ── Keyboard shortcuts ──
