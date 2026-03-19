@@ -57,6 +57,17 @@ if (typeof AbortSignal.timeout !== 'function') {
   const STYLE_ID        = 'mce-spellcheck-styles';
   const AUTO_CHECK_DEBOUNCE_MS = 1500;
 
+  let pluginLogger = null;
+  function safeLog(message, payload) {
+    const fn = pluginLogger?.info || pluginLogger?.log;
+    if (typeof fn !== 'function') return;
+    try {
+      fn.call(pluginLogger, `[HebrewSpellCheck] ${message}`, payload);
+    } catch (_err) {
+      // swallow logger failures to avoid breaking plugin
+    }
+  }
+
   // ─── CSS injected into editor content document ─────────────────────────────
 
   const EDITOR_CSS = `
@@ -929,17 +940,7 @@ if (typeof AbortSignal.timeout !== 'function') {
     const language = editor.options.get('hebrewspellcheck_language');
     const maxSug   = editor.options.get('hebrewspellcheck_max_suggestions');
     let   autoCheckEnabled = editor.options.get('hebrewspellcheck_auto_check');
-    const logger   = editor.options.get('hebrewspellcheck_logger');
-
-    function safeLog(message, payload) {
-      const fn = logger?.info || logger?.log;
-      if (typeof fn !== 'function') return;
-      try {
-        fn.call(logger, `[HebrewSpellCheck] ${message}`, payload);
-      } catch (_err) {
-        // swallow logger failures to avoid breaking plugin
-      }
-    }
+    pluginLogger = editor.options.get('hebrewspellcheck_logger');
 
     // Words ignored for the lifetime of this editor session (not persisted)
     const sessionIgnored = new Set();
