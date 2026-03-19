@@ -1,3 +1,16 @@
+// Add this at the top of your script
+if (typeof AbortSignal.timeout !== 'function') {
+  AbortSignal.timeout = function(ms) {
+    const controller = new AbortController();
+    setTimeout(() => {
+      // Modern browsers use 'TimeoutError', but older polyfills 
+      // often just trigger a standard abort.
+      controller.abort(); 
+    }, ms);
+    return controller.signal;
+  };
+}
+
 /**
  * TinyMCE v7 – Hebrew Spell-Check Plugin
  * =======================================
@@ -211,65 +224,63 @@
     });
   }
 
-  function applyHighlights(segments, misspellings) {
-  // 1. Group misspellings by the segment they belong to
-  const segmentMap = new Map();
-
-  for (const miss of misspellings) {
-    const seg = segments.find(
-      (s) => s.start <= miss.start && s.end >= miss.end
-    );
-    if (!seg) continue;
-
-    if (!segmentMap.has(seg)) segmentMap.set(seg, []);
-    segmentMap.get(seg).push(miss);
-  }
-
-  // 2. Process each segment that has misspellings
-  for (const [seg, misses] of segmentMap) {
-    // Sort misspellings by start position (ascending)
-    misses.sort((a, b) => a.start - b.start);
-
-    const fragment = document.createDocumentFragment();
-    let lastIndex = 0;
-    const fullText = seg.node.textContent;
-
-    for (const miss of misses) {
-      const localStart = miss.start - seg.start;
-      const localEnd = miss.end - seg.start;
-
-      // Add the plain text before the misspelling
-      if (localStart > lastIndex) {
-        fragment.appendChild(
-          document.createTextNode(fullText.slice(lastIndex, localStart))
-        );
-      }
-
-      // Add the highlighted span
-      const span = document.createElement('span');
-      span.className = SPAN_CLASS;
-      span.textContent = fullText.slice(localStart, localEnd);
-      span.dataset.word = miss.word;
-      span.dataset.suggestions = JSON.stringify(miss.suggestions || []);
-      fragment.appendChild(span);
-
-      lastIndex = localEnd;
-    }
-
-    // Add any remaining text after the last misspelling
-    if (lastIndex < fullText.length) {
-      fragment.appendChild(
-        document.createTextNode(fullText.slice(lastIndex))
+  function applyHighlights(editor, segments, misspellings) {
+    const doc = editor.getDoc();
+    // Use Type 2 bookmark. Since we aren't destroying the parent 
+    // container, this is very stable.
+    const bookmark = editor.selection.getBookmark();
+    const segmentMap = new Map();
+    for (const miss of misspellings) {
+      const seg = segments.find(
+        (s) => s.start <= miss.start && s.end >= miss.end
       );
+      if (!seg) continue;
+      if (!segmentMap.has(seg)) segmentMap.set(seg, []);
+      segmentMap.get(seg).push(miss);
     }
-
-    // 3. Replace the old node with the new content
-    seg.node.parentNode.replaceChild(fragment, seg.node);
-    
-    // Mark as wrapped to prevent double-processing
-    seg.wrapped = true; 
+  
+    for (const [seg, misses] of segmentMap) {
+      // CRITICAL: Sort from RIGHT to LEFT (descending).
+      // This allows us to split the text node from the end to the start
+      // without invalidating the offsets for the words at the beginning.
+      misses.sort((a, b) => b.start - a.start);
+  
+      for (const miss of misses) {
+        const localStart = miss.start - seg.start;
+        const localEnd = miss.end - seg.start;
+  
+        // Ensure the node is still valid and has enough length
+        if (!seg.node || localStart < 0 || localEnd > seg.node.textContent.length) continue;
+  
+        try {
+          // 1. Split the node at the end of the word
+          const afterNode = seg.node.splitText(localEnd);
+          // 2. Split the node at the start of the word
+          const wordNode = seg.node.splitText(localStart);
+  
+          // wordNode now contains exactly the misspelled word.
+          // seg.node now contains the text BEFORE the word.
+  
+          // 3. Create the highlight span
+          const span = doc.createElement('span');
+          span.className = SPAN_CLASS;
+          span.dataset.word = miss.word;
+          span.dataset.suggestions = JSON.stringify(miss.suggestions || []);
+  
+          // 4. Wrap the wordNode
+          wordNode.parentNode.insertBefore(span, wordNode);
+          span.appendChild(wordNode);
+        } catch (e) {
+          console.warn("Skipping highlight due to node shift:", e);
+        }
+      }
+      seg.wrapped = true;
+    }
+  
+    // 5. Finalize
+    editor.nodeChanged();
+    editor.selection.moveToBookmark(bookmark);
   }
-}
 
   // ─── Suggestion popover ────────────────────────────────────────────────────
 
@@ -987,7 +998,7 @@
         });
 
         editor.undoManager.transact(() => {
-          applyHighlights(segments, misspellings);
+          applyHighlights(editor, segments, misspellings);
         });
 
         if (!silent) {
