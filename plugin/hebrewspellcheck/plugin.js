@@ -33,6 +33,7 @@ if (typeof AbortSignal.timeout !== 'function') {
  *     hebrewspellcheck_language:        'he-IL',
  *     hebrewspellcheck_max_suggestions: 5,
  *     hebrewspellcheck_auto_check:      false,   // auto-check while typing
+ *     hebrewspellcheck_logger:          window.console, // optional logger instance
  *   });
  *
  * Toolbar buttons available:
@@ -55,6 +56,17 @@ if (typeof AbortSignal.timeout !== 'function') {
   const POPOVER_ID      = 'mce-spellcheck-popover';
   const STYLE_ID        = 'mce-spellcheck-styles';
   const AUTO_CHECK_DEBOUNCE_MS = 1500;
+
+  let pluginLogger = null;
+  function safeLog(message, payload) {
+    const fn = pluginLogger?.info || pluginLogger?.log;
+    if (typeof fn !== 'function') return;
+    try {
+      fn.call(pluginLogger, `[HebrewSpellCheck] ${message}`, payload);
+    } catch (_err) {
+      // swallow logger failures to avoid breaking plugin
+    }
+  }
 
   // ─── CSS injected into editor content document ─────────────────────────────
 
@@ -377,6 +389,7 @@ if (typeof AbortSignal.timeout !== 'function') {
         suggestions.forEach((sug) => {
           addRow(`• ${sug}`, () => {
             this._replace(span, sug, editor);
+            safeLog('click_replace_suggestion', { word, suggestion: sug });
             this.hide();
             if (typeof onReplace === 'function') onReplace();
           });
@@ -394,11 +407,12 @@ if (typeof AbortSignal.timeout !== 'function') {
       el.appendChild(hr);
 
       // Actions
-      addRow('התעלם כאן', () => { this._ignore(span); this.hide(); });
+      addRow('התעלם כאן', () => { this._ignore(span); this.hide(); safeLog('click_ignore_here', { word }); });
 
       addRow('התעלם בכל המסמך', () => {
         this._removeWordHighlights(word, editor);
         this.hide();
+        safeLog('click_ignore_all', { word });
         if (typeof onIgnoreAll === 'function') onIgnoreAll(word);
       });
 
@@ -407,6 +421,7 @@ if (typeof AbortSignal.timeout !== 'function') {
           await Api.addToDictionary(word);
           this._removeWordHighlights(word, editor);
           this.hide();
+          safeLog('click_add_to_dictionary', { word });
           Notifier.show('המילה נוספה למילון בהצלחה ✓', 'success');
         } catch (err) {
           Notifier.show('שגיאה בהוספה למילון — בדוק שהשרת פועל', 'error');
@@ -915,12 +930,17 @@ if (typeof AbortSignal.timeout !== 'function') {
       processor: 'boolean',
       default:   false,
     });
+    editor.options.register('hebrewspellcheck_logger', {
+      processor: 'object',
+      default:   null,
+    });
 
     // ── STEP 2: Read options ──
     const apiUrl   = editor.options.get('hebrewspellcheck_api_url');
     const language = editor.options.get('hebrewspellcheck_language');
     const maxSug   = editor.options.get('hebrewspellcheck_max_suggestions');
     let   autoCheckEnabled = editor.options.get('hebrewspellcheck_auto_check');
+    pluginLogger = editor.options.get('hebrewspellcheck_logger');
 
     // Words ignored for the lifetime of this editor session (not persisted)
     const sessionIgnored = new Set();
@@ -949,6 +969,12 @@ if (typeof AbortSignal.timeout !== 'function') {
       if (target && target.classList && target.classList.contains(SPAN_CLASS)) {
         e.preventDefault();
         e.stopPropagation();
+        const word = target.dataset.word || target.textContent;
+        const suggestions = (() => {
+          try { return JSON.parse(target.dataset.suggestions || '[]'); } catch (_err) { return []; }
+        })();
+        safeLog('click_misspelled_word', { word, suggestions });
+
         Popover.show(target, editor, () => runSpellCheck(false, true), (word) => {
           sessionIgnored.add(word);
           Notifier.show(`"${word}" יתעלם בכל המסמך לאורך הסשן`, 'info');
@@ -1037,13 +1063,19 @@ if (typeof AbortSignal.timeout !== 'function') {
     editor.ui.registry.addButton('hebrewspellcheck', {
       icon:    'hsc-check',
       tooltip: 'בדיקת איות בעברית',
-      onAction: () => runSpellCheck(true),
+      onAction: () => {
+        safeLog('click_spellcheck_button', {});
+        runSpellCheck(true);
+      },
     });
 
     editor.ui.registry.addButton('hebrewspellcheck_clear', {
       icon:    'hsc-clear',
       tooltip: 'נקה סימוני איות',
-      onAction: clearAllHighlights,
+      onAction: () => {
+        safeLog('click_clear_button', {});
+        clearAllHighlights();
+      },
     });
 
     // Toggle button — stays "pressed" (highlighted) while auto-check is active
@@ -1057,6 +1089,7 @@ if (typeof AbortSignal.timeout !== 'function') {
       onAction: (api) => {
         autoCheckEnabled = !autoCheckEnabled;
         api.setActive(autoCheckEnabled);
+        safeLog('click_toggle_auto', { enabled: autoCheckEnabled });
         Notifier.show(
           autoCheckEnabled ? 'בדיקת איות אוטומטית הופעלה' : 'בדיקת איות אוטומטית כובתה',
           'info'
@@ -1069,7 +1102,10 @@ if (typeof AbortSignal.timeout !== 'function') {
     editor.ui.registry.addButton('hebrewspellcheck_dictionary', {
       icon:    'hsc-dict',
       tooltip: 'ניהול מילון הארגון',
-      onAction: () => DictionaryManager.open(),
+      onAction: () => {
+        safeLog('click_dictionary_button', {});
+        DictionaryManager.open();
+      },
     });
 
     // ── Keyboard shortcuts ──
