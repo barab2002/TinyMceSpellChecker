@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     max_text_length: int = 200_000
     max_suggestions: int = 5
 
+    # --- Redis ---
+    # Set to empty string to run without Redis (hunspell-only mode)
+    redis_url: str = "redis://redis:6379/0"
+
     # --- Logging ---
     log_level: str = "INFO"
 

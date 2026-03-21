@@ -238,7 +238,7 @@ class HealthResponse(BaseModel):
     status: str = Field(..., description="'ok' when the service is healthy.", examples=["ok"])
     hunspell_available: bool = Field(
         ...,
-        description="True when the spylls dictionary is loaded and ready.",
+        description="True when the Hunspell dictionary is loaded and ready.",
     )
     language: str = Field(
         ...,
@@ -250,6 +250,15 @@ class HealthResponse(BaseModel):
         description="Number of words in the organisational dictionary.",
         ge=0,
     )
+    redis_available: bool = Field(
+        default=False,
+        description="True when Redis is reachable and the dictionary SET is ready.",
+    )
+    redis_dict_words: int = Field(
+        default=0,
+        description="Number of base-form Hebrew words loaded into the Redis SET.",
+        ge=0,
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -258,6 +267,8 @@ class HealthResponse(BaseModel):
                 "hunspell_available": True,
                 "language": "he_IL",
                 "custom_dict_words": 18,
+                "redis_available": True,
+                "redis_dict_words": 469751,
             }
         }
     }

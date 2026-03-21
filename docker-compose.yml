@@ -1,6 +1,19 @@
 version: '3.9'
 
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: hebrew-spellcheck-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   spellcheck-api:
     build:
       context: ./backend
@@ -19,6 +32,10 @@ services:
       - SPELLCHECK_DEFAULT_LANGUAGE=he_IL
       - SPELLCHECK_MAX_TEXT_LENGTH=200000
       - SPELLCHECK_MAX_SUGGESTIONS=5
+      - SPELLCHECK_REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
     volumes:
       # Persist the custom dictionary across container restarts
       - ./backend/dictionaries/custom:/app/dictionaries/custom

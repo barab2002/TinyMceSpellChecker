@@ -32,9 +32,12 @@ Strategy:
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Iterator, List, Tuple
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple
 
 from .dictionary_service import DictionaryService
+
+if TYPE_CHECKING:
+    from .redis_service import RedisService
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +121,15 @@ def _org_dict_match(clean: str, custom_dict: "DictionaryService") -> bool:
 
 
 class SpellService:
-    def __init__(self, dict_dir: str, language: str = "he_IL") -> None:
+    def __init__(
+        self,
+        dict_dir: str,
+        language: str = "he_IL",
+        redis_svc: "Optional[RedisService]" = None,
+    ) -> None:
         self.language = language
         self._dic = None
+        self._redis = redis_svc
         # Cross-request caches — populated on first encounter, reused forever
         self._lookup_cache: Dict[str, bool] = {}
         self._suggest_cache: Dict[Tuple[str, int], List[str]] = {}
@@ -169,6 +178,11 @@ class SpellService:
         if clean in self._lookup_cache:
             return self._lookup_cache[clean]
 
+        # Fast path: Redis dictionary SET covers all base forms from he_IL.dic
+        if self._redis and self._redis.is_word(clean, self.language):
+            self._lookup_cache[clean] = True
+            return True
+
         try:
             result = bool(self._dic.spell(clean))
         except Exception:
@@ -197,10 +211,14 @@ class SpellService:
         return suggestions
 
     def cache_stats(self) -> dict:
-        return {
+        stats: dict = {
             "lookup_cached_words": len(self._lookup_cache),
             "suggest_cached_entries": len(self._suggest_cache),
+            "redis_available": self._redis is not None and self._redis.is_available(),
         }
+        if self._redis and self._redis.is_available():
+            stats["redis_dict_size"] = self._redis.dict_size(self.language)
+        return stats
 
     # ------------------------------------------------------------------
     # Tokenisation
