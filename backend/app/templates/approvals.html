@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block title %}Word Approvals — SpellCheck Admin{% endblock %}
+
+{% block content %}
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">
+        Word Approvals
+        {% if pending_count > 0 %}<span class="badge badge-red" style="font-size:.9rem;vertical-align:middle;margin-left:8px;">{{ pending_count }}</span>{% endif %}
+      </h1>
+      <p class="page-subtitle">
+        Review words suggested by TinyMCE plugin users.
+        {% if not mongo_available %}
+          <span class="badge badge-amber">MongoDB not configured — no pending words</span>
+        {% endif %}
+      </p>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-sm" id="bulkApproveBtn" style="display:none" onclick="bulkAction('approve')">✓ Approve Selected</button>
+      <button class="btn btn-ghost btn-sm" id="bulkDismissBtn" style="display:none" onclick="bulkAction('dismiss')">✕ Dismiss Selected</button>
+      <button class="btn btn-ghost btn-sm" onclick="loadWords()">↺ Refresh</button>
+    </div>
+  </div>
+
+  <!-- Status tabs (draggable) -->
+  <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px;">
+    <div class="tab-bar" id="statusTabs">
+      <div class="tab active" data-tab data-status="pending" onclick="setStatus('pending', this)">
+        Pending <span class="tab-count red" id="pendingCount">…</span>
+      </div>
+      <div class="tab" data-tab data-status="approved" onclick="setStatus('approved', this)">
+        Approved <span class="tab-count" id="approvedCount">…</span>
+      </div>
+      <div class="tab" data-tab data-status="dismissed" onclick="setStatus('dismissed', this)">
+        Dismissed <span class="tab-count" id="dismissedCount">…</span>
+      </div>
+    </div>
+    <select class="input" id="langFilter" style="width:auto;min-width:140px;" onchange="setLangFilter(this.value)">
+      <option value="all">All languages</option>
+      {% for lang in languages %}
+      <option value="{{ lang }}">{{ lang }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  {% if not mongo_available %}
+  <div class="card">
+    <div class="card-body empty-state">
+      <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+        <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+      </svg>
+      <p style="font-size:1rem;font-weight:600;color:var(--text);margin-bottom:6px;">MongoDB not configured</p>
+      <p>Set <code>SPELLCHECK_MONGO_URI</code> in your <code>.env</code> file to enable the word approval queue.</p>
+      <a href="/" class="btn btn-primary" style="margin-top:16px;">Setup guide</a>
+    </div>
+  </div>
+  {% else %}
+
+  <!-- Word cards -->
+  <div id="wordCards">
+    <div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:60px;color:var(--text-muted)"><div class="spinner"></div>Loading...</div>
+  </div>
+
+  <!-- Pagination -->
+  <div class="pagination" id="pagination"></div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if mongo_available %}
+<script>
+  let currentStatus = 'pending';
+  let currentLang = 'all';
+  let currentPage = 1;
+  const PAGE_SIZE = 30;
+  let selected = new Set();
+
+  async function loadCounts() {
+    const statuses = ['pending', 'approved', 'dismissed'];
+    for (const s of statuses) {
+      const res = await fetch(`/dictionary/pending?status=${s}&page_size=1`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const el = document.getElementById(`${s}Count`);
+      if (el) el.textContent = data.total;
+    }
+  }
+
+  async function loadWords() {
+    selected.clear();
+    updateBulkButtons();
+    const params = new URLSearchParams({ status: currentStatus, language: currentLang, page: currentPage, page_size: PAGE_SIZE });
+    const res = await fetch(`/dictionary/pending?${params}`);
+    if (!res.ok) { showToast('Failed to load', 'error'); return; }
+    const data = await res.json();
+    renderCards(data.words, data.total);
+    renderPagination(data.total, data.page || currentPage);
+  }
+
+  function renderCards(words, total) {
+    const container = document.getElementById('wordCards');
+    if (!words.length) {
+      container.innerHTML = `<div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/></svg><p>No ${currentStatus} words</p></div>`;
+      return;
+    }
+
+    const isPending = currentStatus === 'pending';
+    container.innerHTML = `
+      ${isPending ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <input type="checkbox" id="selectAll" onchange="toggleSelectAll(this.checked)" style="width:16px;height:16px;cursor:pointer;">
+        <label for="selectAll" class="text-sm text-muted">Select all ${words.length}</label>
+      </div>` : ''}
+      <div style="display:grid;gap:12px;">
+        ${words.map(w => renderCard(w, isPending)).join('')}
+      </div>
+    `;
+  }
+
+  function renderCard(w, isPending) {
+    const langColors = { 'he-IL': '#2563eb', 'en-US': '#059669', 'en-GB': '#059669', 'ar-SA': '#d97706', all: '#64748b' };
+    const color = langColors[w.language] || '#64748b';
+    const date = w.submitted_at ? new Date(w.submitted_at).toLocaleString() : '—';
+    const reviewedDate = w.reviewed_at ? new Date(w.reviewed_at).toLocaleString() : null;
+    return `
+      <div class="card" id="card-${w.id}" style="border-left: 3px solid ${color};">
+        <div class="card-body" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+          ${isPending ? `<input type="checkbox" data-id="${w.id}" class="word-check" onchange="onCheck(this)" style="width:16px;height:16px;cursor:pointer;flex-shrink:0;">` : ''}
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+              <span style="font-size:1.15rem;font-weight:700;" class="font-mono">${esc(w.word)}</span>
+              <span class="badge" style="background:${color}20;color:${color};">${esc(w.language)}</span>
+            </div>
+            <div class="text-sm text-muted" style="margin-top:4px;">
+              Submitted: ${date}
+              ${reviewedDate ? ` · Reviewed: ${reviewedDate}` : ''}
+              ${w.context ? ` · Context: <em>${esc(w.context.substring(0, 80))}</em>` : ''}
+            </div>
+          </div>
+          ${isPending ? `
+            <div style="display:flex;gap:8px;flex-shrink:0;">
+              <button class="btn btn-success btn-sm" onclick="approve('${w.id}')">✓ Approve</button>
+              <button class="btn btn-danger btn-sm" onclick="dismiss('${w.id}')">✕ Dismiss</button>
+            </div>
+          ` : `
+            <span class="badge ${w.status === 'approved' ? 'badge-green' : 'badge-gray'}" style="flex-shrink:0;">${w.status}</span>
+          `}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderPagination(total, page) {
+    const pages = Math.ceil(total / PAGE_SIZE);
+    if (pages <= 1) { document.getElementById('pagination').innerHTML = ''; return; }
+    let html = `<button class="page-btn" onclick="goPage(${page-1})" ${page<=1?'disabled':''}>‹</button>`;
+    for (let i = Math.max(1,page-2); i <= Math.min(pages,page+2); i++)
+      html += `<button class="page-btn ${i===page?'active':''}" onclick="goPage(${i})">${i}</button>`;
+    html += `<button class="page-btn" onclick="goPage(${page+1})" ${page>=pages?'disabled':''}>›</button>`;
+    document.getElementById('pagination').innerHTML = html;
+  }
+
+  function goPage(p) { currentPage = p; loadWords(); }
+
+  function setStatus(status, el) {
+    currentStatus = status;
+    currentPage = 1;
+    document.querySelectorAll('#statusTabs .tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    loadWords();
+  }
+
+  function setLangFilter(lang) { currentLang = lang; currentPage = 1; loadWords(); }
+
+  function onCheck(checkbox) {
+    if (checkbox.checked) selected.add(checkbox.dataset.id);
+    else selected.delete(checkbox.dataset.id);
+    updateBulkButtons();
+  }
+
+  function toggleSelectAll(checked) {
+    document.querySelectorAll('.word-check').forEach(cb => { cb.checked = checked; if (checked) selected.add(cb.dataset.id); else selected.delete(cb.dataset.id); });
+    updateBulkButtons();
+  }
+
+  function updateBulkButtons() {
+    const show = selected.size > 0 && currentStatus === 'pending';
+    document.getElementById('bulkApproveBtn').style.display = show ? '' : 'none';
+    document.getElementById('bulkDismissBtn').style.display = show ? '' : 'none';
+  }
+
+  async function approve(id) {
+    const res = await fetch(`/dictionary/pending/${id}/approve`, { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      showToast(`"${data.word}" approved ✓`, 'success');
+      document.getElementById(`card-${id}`)?.remove();
+      loadCounts();
+    } else showToast('Approval failed', 'error');
+  }
+
+  async function dismiss(id) {
+    const res = await fetch(`/dictionary/pending/${id}/dismiss`, { method: 'POST' });
+    if (res.ok) {
+      showToast('Word dismissed', 'info');
+      document.getElementById(`card-${id}`)?.remove();
+      loadCounts();
+    } else showToast('Dismiss failed', 'error');
+  }
+
+  async function bulkAction(action) {
+    const ids = [...selected];
+    const fn = action === 'approve' ? approve : dismiss;
+    for (const id of ids) await fn(id);
+    selected.clear();
+    updateBulkButtons();
+    loadWords();
+    loadCounts();
+  }
+
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  initDraggableTabs('#statusTabs');
+  loadCounts();
+  loadWords();
+</script>
+{% endif %}
+{% endblock %}

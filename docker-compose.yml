@@ -1,11 +1,30 @@
 version: '3.9'
 
 services:
+
+  # ── MongoDB — stores the org dictionary and word-approval queue ──────────────
+  # Remove this service if you supply your own MONGO_URI.
+  mongo:
+    image: mongo:7-jammy
+    container_name: spellcheck-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ── Spell-check API ──────────────────────────────────────────────────────────
   spellcheck-api:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: hebrew-spellcheck-api
+    container_name: spellcheck-api
     restart: unless-stopped
     ports:
       - "${API_PORT:-8000}:8000"
@@ -19,23 +38,29 @@ services:
       - SPELLCHECK_DEFAULT_LANGUAGE=he_IL
       - SPELLCHECK_MAX_TEXT_LENGTH=200000
       - SPELLCHECK_MAX_SUGGESTIONS=5
+      # Language whitelist — leave empty to load all available dictionaries
+      - SPELLCHECK_LANGUAGES=${LANGUAGES:-}
+      # MongoDB — remove or leave empty to fall back to JSON file storage
+      - SPELLCHECK_MONGO_URI=${MONGO_URI:-mongodb://mongo:27017}
+      - SPELLCHECK_MONGO_DB=${MONGO_DB:-spellcheck}
     volumes:
-      # Persist the custom dictionary across container restarts
       - ./backend/dictionaries/custom:/app/dictionaries/custom
       - ./backend/logs:/app/logs
+    depends_on:
+      mongo:
+        condition: service_healthy
     healthcheck:
-      # Use Python (already in the image) instead of curl
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\""]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s
+      start_period: 25s
 
-  # Serves the TinyMCE plugin and demo page.
+  # ── Static file server — serves the plugin and demo page ────────────────────
   # Remove this service if you serve static files via your own web server.
   static-server:
     image: nginx:alpine
-    container_name: hebrew-spellcheck-static
+    container_name: spellcheck-static
     restart: unless-stopped
     ports:
       - "${STATIC_PORT:-3000}:80"
@@ -46,3 +71,6 @@ services:
     depends_on:
       spellcheck-api:
         condition: service_healthy
+
+volumes:
+  mongo_data:

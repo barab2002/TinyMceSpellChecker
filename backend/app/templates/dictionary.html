@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+{% block title %}Dictionary Manager — SpellCheck Admin{% endblock %}
+
+{% block content %}
+<div class="page">
+  <div class="page-header">
+    <div>
+      <h1 class="page-title">Organization Dictionary</h1>
+      <p class="page-subtitle">
+        Approved words are never flagged as misspellings.
+        {% if using_mongo %}Backed by <strong>MongoDB</strong>.{% else %}Backed by <strong>JSON file</strong>.{% endif %}
+        <strong id="wordCountBadge">{{ word_count }}</strong> words total.
+      </p>
+    </div>
+    <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-sm" onclick="exportCSV()">⬇ Export CSV</button>
+      <label class="btn btn-ghost btn-sm" style="cursor:pointer;">
+        ⬆ Import CSV
+        <input type="file" accept=".csv,.txt" style="display:none" onchange="importCSV(this)">
+      </label>
+      <button class="btn btn-primary" onclick="openAddModal()">+ Add Word</button>
+    </div>
+  </div>
+
+  <!-- Language tabs (draggable) -->
+  <div class="tab-bar" id="langTabs">
+    <div class="tab active" data-tab data-lang="all" onclick="setLang('all', this)">All Languages</div>
+    {% for lang in languages %}
+    <div class="tab" data-tab data-lang="{{ lang }}" onclick="setLang('{{ lang }}', this)">
+      {% if lang.startswith('he') %}🇮🇱 {{ lang }}
+      {% elif lang.startswith('en') %}🇺🇸 {{ lang }}
+      {% elif lang.startswith('ar') %}🇸🇦 {{ lang }}
+      {% else %}{{ lang }}{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <div class="search-wrap">
+        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input class="input" id="searchInput" type="search" placeholder="Search words..." autocomplete="off" oninput="onSearch(this.value)">
+        <div class="autocomplete-list" id="acList" style="display:none"></div>
+      </div>
+    </div>
+    <div class="toolbar-right">
+      <span class="text-sm text-muted" id="totalLabel">Loading...</span>
+    </div>
+  </div>
+
+  <!-- Word table -->
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Word</th>
+          <th>Language</th>
+          <th>Added</th>
+          <th style="width:80px;text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="wordTable">
+        <tr><td colspan="4"><div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:40px;color:var(--text-muted)"><div class="spinner"></div>Loading...</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Pagination -->
+  <div class="pagination" id="pagination"></div>
+</div>
+
+<!-- Add word modal -->
+<div class="modal-overlay" id="addModal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">Add Word to Dictionary</span>
+      <button class="btn btn-icon btn-ghost" onclick="closeAddModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Word</label>
+        <input class="input" id="newWord" type="text" placeholder="e.g. Salesforce" dir="auto">
+        <p class="form-hint">The word will be approved immediately and accepted for all languages.</p>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Language scope</label>
+        <select class="input" id="newLang">
+          <option value="all">All languages (recommended)</option>
+          {% for lang in languages %}
+          <option value="{{ lang }}">{{ lang }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeAddModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="addWord()">Add Word</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let currentLang = 'all';
+  let currentPage = 1;
+  const PAGE_SIZE = 50;
+  let searchTimer = null;
+  let currentQ = '';
+
+  async function loadWords() {
+    const params = new URLSearchParams({ language: currentLang, q: currentQ, page: currentPage, page_size: PAGE_SIZE });
+    const res = await fetch(`/dictionary/words?${params}`, { headers: { Accept: 'application/json' } });
+    if (!res.ok) { showToast('Failed to load words', 'error'); return; }
+    const data = await res.json();
+    renderTable(data.words);
+    renderPagination(data.total, data.page);
+    document.getElementById('totalLabel').textContent = `${data.total} word${data.total !== 1 ? 's' : ''}`;
+    document.getElementById('wordCountBadge').textContent = data.total;
+  }
+
+  function renderTable(words) {
+    const tbody = document.getElementById('wordTable');
+    if (!words.length) {
+      tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><p>No words found</p></div></td></tr>`;
+      return;
+    }
+    tbody.innerHTML = words.map(w => {
+      const langBadge = langBadgeHtml(w.language);
+      const date = w.added_at ? new Date(w.added_at).toLocaleDateString() : '—';
+      return `<tr>
+        <td><span class="font-mono" style="font-size:.9rem;">${esc(w.word)}</span></td>
+        <td>${langBadge}</td>
+        <td><span class="text-muted text-sm">${date}</span></td>
+        <td style="text-align:right">
+          <button class="btn btn-icon btn-ghost btn-sm" title="Delete" onclick="deleteWord('${esc(w.word)}')">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+          </button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderPagination(total, page) {
+    const pages = Math.ceil(total / PAGE_SIZE);
+    if (pages <= 1) { document.getElementById('pagination').innerHTML = ''; return; }
+    let html = `<button class="page-btn" onclick="goPage(${page-1})" ${page<=1?'disabled':''}>‹</button>`;
+    const start = Math.max(1, page - 2), end = Math.min(pages, page + 2);
+    if (start > 1) html += `<button class="page-btn" onclick="goPage(1)">1</button>${start > 2 ? '<span style="padding:0 4px">…</span>' : ''}`;
+    for (let i = start; i <= end; i++) html += `<button class="page-btn ${i===page?'active':''}" onclick="goPage(${i})">${i}</button>`;
+    if (end < pages) html += `${end < pages-1 ? '<span style="padding:0 4px">…</span>' : ''}<button class="page-btn" onclick="goPage(${pages})">${pages}</button>`;
+    html += `<button class="page-btn" onclick="goPage(${page+1})" ${page>=pages?'disabled':''}>›</button>`;
+    document.getElementById('pagination').innerHTML = html;
+  }
+
+  function langBadgeHtml(lang) {
+    const classes = { all: 'badge-gray', 'he-IL': 'badge-blue', 'en-US': 'badge-green', 'en-GB': 'badge-green', 'ar-SA': 'badge-amber' };
+    return `<span class="badge ${classes[lang] || 'badge-gray'}">${lang}</span>`;
+  }
+
+  function setLang(lang, el) {
+    currentLang = lang;
+    currentPage = 1;
+    document.querySelectorAll('#langTabs .tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    loadWords();
+  }
+
+  function goPage(p) { currentPage = p; loadWords(); }
+
+  function onSearch(val) {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      currentQ = val;
+      currentPage = 1;
+      loadWords();
+      if (val.length >= 1) fetchAutocomplete(val);
+      else document.getElementById('acList').style.display = 'none';
+    }, 300);
+  }
+
+  async function fetchAutocomplete(q) {
+    const params = new URLSearchParams({ q, language: currentLang, limit: 8 });
+    const res = await fetch(`/dictionary/search?${params}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const list = document.getElementById('acList');
+    if (!data.results.length) { list.style.display = 'none'; return; }
+    list.innerHTML = data.results.map(w => `<div class="autocomplete-item" onclick="selectAC('${esc(w)}')">${esc(w)}</div>`).join('');
+    list.style.display = 'block';
+  }
+
+  function selectAC(word) {
+    document.getElementById('searchInput').value = word;
+    document.getElementById('acList').style.display = 'none';
+    currentQ = word;
+    currentPage = 1;
+    loadWords();
+  }
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.search-wrap')) document.getElementById('acList').style.display = 'none';
+  });
+
+  async function deleteWord(word) {
+    if (!confirm(`Remove "${word}" from the dictionary?`)) return;
+    const res = await fetch('/dictionary/remove', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ word, language: currentLang }),
+    });
+    if (res.ok) { showToast(`"${word}" removed`, 'success'); loadWords(); }
+    else showToast('Failed to remove word', 'error');
+  }
+
+  function openAddModal() { document.getElementById('addModal').classList.add('open'); document.getElementById('newWord').focus(); }
+  function closeAddModal() { document.getElementById('addModal').classList.remove('open'); }
+
+  async function addWord() {
+    const word = document.getElementById('newWord').value.trim();
+    const language = document.getElementById('newLang').value;
+    if (!word) { showToast('Enter a word first', 'error'); return; }
+    const res = await fetch('/dictionary/add', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ word, language }),
+    });
+    if (res.ok) {
+      showToast(`"${word}" added to dictionary ✓`, 'success');
+      closeAddModal();
+      document.getElementById('newWord').value = '';
+      loadWords();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.detail || 'Failed to add word', 'error');
+    }
+  }
+
+  function exportCSV() { window.location.href = '/dictionary/export'; }
+
+  async function importCSV(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch('/dictionary/import', { method: 'POST', body: form });
+    if (res.ok) {
+      const data = await res.json();
+      showToast(`Imported: ${data.added} added, ${data.skipped} skipped`, 'success');
+      loadWords();
+    } else showToast('Import failed', 'error');
+    input.value = '';
+  }
+
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  // Modal close on overlay click
+  document.getElementById('addModal').addEventListener('click', e => { if (e.target === e.currentTarget) closeAddModal(); });
+
+  // Enter key in add modal
+  document.getElementById('newWord')?.addEventListener('keydown', e => { if (e.key === 'Enter') addWord(); });
+
+  // Init
+  initDraggableTabs('#langTabs');
+  loadWords();
+</script>
+{% endblock %}

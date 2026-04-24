@@ -1,7 +1,5 @@
 """
 Pydantic schemas for API request / response validation.
-All fields carry openapi_examples so the Swagger UI (/docs) shows
-realistic, runnable examples for every endpoint.
 """
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List
@@ -30,10 +28,7 @@ class SpellCheckOptions(BaseModel):
 class SpellCheckRequest(BaseModel):
     text: str = Field(
         ...,
-        description=(
-            "Plain text to spell-check.  "
-            "Do NOT send raw HTML — the TinyMCE plugin strips HTML before sending."
-        ),
+        description="Plain text to spell-check. Do NOT send raw HTML.",
         min_length=1,
         openapi_examples={
             "basic_hebrew": {
@@ -45,17 +40,14 @@ class SpellCheckRequest(BaseModel):
                 "value": "שלום לכולם. אנחנו עוסקים בפיתוח תוכנה.",
             },
             "with_org_words": {
-                "summary": "Text containing org-dictionary words (should not be flagged)",
+                "summary": "Text containing org-dictionary words",
                 "value": "המערכת שלנו מבוססת על Salesforce ו-ZoomInfo לניהול לקוחות.",
             },
         },
     )
     language: str = Field(
         default="he-IL",
-        description="BCP-47 language tag.  Currently supported: he-IL (Hebrew).",
-        openapi_examples={
-            "hebrew": {"summary": "Hebrew (Israel)", "value": "he-IL"},
-        },
+        description="BCP-47 language tag. Supported: he-IL, en-US, en-GB, ar-SA.",
     )
     documentId: Optional[str] = Field(
         default=None,
@@ -77,12 +69,14 @@ class SpellCheckRequest(BaseModel):
     @field_validator("language")
     @classmethod
     def language_allowed(cls, v: str) -> str:
-        # Whitelist prevents path-traversal attacks on dictionary file names
-        allowed = {"he-IL", "he_IL", "en-US", "en_US", "en-GB", "en_GB"}
+        allowed = {
+            "he-IL", "he_IL",
+            "en-US", "en_US", "en-GB", "en_GB",
+            "ar-SA", "ar_SA", "ar",
+        }
         if v not in allowed:
             raise ValueError(
-                f"Unsupported language: {v!r}. "
-                f"Supported: {sorted(allowed)}"
+                f"Unsupported language: {v!r}. Supported: {sorted(allowed)}"
             )
         return v
 
@@ -100,31 +94,11 @@ class SpellCheckRequest(BaseModel):
 # ─── Spell-check response ─────────────────────────────────────────────────────
 
 class Misspelling(BaseModel):
-    word: str = Field(
-        ...,
-        description="The misspelled word as it appeared in the input text.",
-        examples=["שלומ"],
-    )
-    start: int = Field(
-        ...,
-        description="Start character offset in the plain text that was submitted.",
-        examples=[0],
-    )
-    end: int = Field(
-        ...,
-        description="Exclusive end character offset.",
-        examples=[4],
-    )
-    suggestions: List[str] = Field(
-        ...,
-        description="Ordered list of spelling suggestions (best first).",
-        examples=[["שלום", "שלמו"]],
-    )
-    source: str = Field(
-        default="hunspell",
-        description="The spell-check engine that flagged this word.",
-        examples=["hunspell"],
-    )
+    word: str = Field(..., description="The misspelled word as it appeared in the input text.")
+    start: int = Field(..., description="Start character offset in the submitted plain text.")
+    end: int = Field(..., description="Exclusive end character offset.")
+    suggestions: List[str] = Field(..., description="Ordered list of spelling suggestions (best first).")
+    source: str = Field(default="hunspell", description="The spell-check engine that flagged this word.")
 
     model_config = {
         "json_schema_extra": {
@@ -141,13 +115,7 @@ class Misspelling(BaseModel):
 
 class SpellCheckResponse(BaseModel):
     language: str = Field(..., description="Language tag echoed from the request.")
-    misspellings: List[Misspelling] = Field(
-        ...,
-        description=(
-            "List of misspelled words with their offsets in the submitted plain text. "
-            "Empty list means no errors found."
-        ),
-    )
+    misspellings: List[Misspelling] = Field(..., description="List of misspelled words with offsets.")
     total: int = Field(..., description="Total number of misspellings found.", ge=0)
 
     model_config = {
@@ -155,22 +123,9 @@ class SpellCheckResponse(BaseModel):
             "example": {
                 "language": "he-IL",
                 "misspellings": [
-                    {
-                        "word": "שלומ",
-                        "start": 0,
-                        "end": 4,
-                        "suggestions": ["שלום", "שלמו"],
-                        "source": "hunspell",
-                    },
-                    {
-                        "word": "אורחנוזציה",
-                        "start": 33,
-                        "end": 43,
-                        "suggestions": [],
-                        "source": "hunspell",
-                    },
+                    {"word": "שלומ", "start": 0, "end": 4, "suggestions": ["שלום", "שלמו"], "source": "hunspell"},
                 ],
-                "total": 2,
+                "total": 1,
             }
         }
     }
@@ -180,11 +135,14 @@ class SpellCheckResponse(BaseModel):
 
 class DictionaryWord(BaseModel):
     word: str = Field(
-        ...,
-        min_length=1,
-        max_length=200,
+        ..., min_length=1, max_length=200,
         description="The word to add or remove from the organisational dictionary.",
         examples=["Salesforce", "ZoomInfo", "MyProduct"],
+    )
+    language: str = Field(
+        default="all",
+        description="Language scope. 'all' means accepted for every language.",
+        examples=["all", "he-IL", "en-US"],
     )
 
     @field_validator("word")
@@ -196,18 +154,20 @@ class DictionaryWord(BaseModel):
         return v
 
     model_config = {
-        "json_schema_extra": {
-            "example": {"word": "Salesforce"}
-        }
+        "json_schema_extra": {"example": {"word": "Salesforce", "language": "all"}}
     }
 
 
+class DictionaryWordEntry(BaseModel):
+    """A single entry returned in the paginated dictionary list."""
+    word: str
+    language: str
+    added_at: str = ""
+
+
 class DictionaryResponse(BaseModel):
-    words: List[str] = Field(
-        ...,
-        description="All words currently in the organisational dictionary, sorted alphabetically.",
-    )
-    count: int = Field(..., description="Total number of words in the dictionary.", ge=0)
+    words: List[str] = Field(..., description="All words in the organisational dictionary.")
+    count: int = Field(..., description="Total number of words.", ge=0)
 
     model_config = {
         "json_schema_extra": {
@@ -217,6 +177,14 @@ class DictionaryResponse(BaseModel):
             }
         }
     }
+
+
+class DictionaryPageResponse(BaseModel):
+    """Paginated dictionary response for the admin GUI."""
+    words: List[DictionaryWordEntry]
+    total: int
+    page: int
+    page_size: int
 
 
 class DictionaryImportResponse(BaseModel):
@@ -232,24 +200,72 @@ class DictionaryImportResponse(BaseModel):
     }
 
 
+# ─── Pending / Approval schemas ───────────────────────────────────────────────
+
+class SuggestWordRequest(BaseModel):
+    """Sent by the TinyMCE plugin when a user clicks 'הוסף למילון'."""
+    word: str = Field(..., min_length=1, max_length=200, description="Word to suggest for approval.")
+    language: str = Field(default="all", description="Language the word was found in.")
+    context: Optional[str] = Field(
+        default=None, max_length=500,
+        description="Optional surrounding text for the reviewer's context.",
+    )
+
+    @field_validator("word")
+    @classmethod
+    def no_control_chars(cls, v: str) -> str:
+        v = v.strip()
+        if re.search(r"[\x00-\x1f\x7f]", v):
+            raise ValueError("Word contains invalid control characters")
+        return v
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"word": "MyProduct", "language": "he-IL", "context": None}
+        }
+    }
+
+
+class SuggestWordResponse(BaseModel):
+    status: str = Field(
+        ...,
+        description="'queued' when using MongoDB, 'added' when using JSON fallback.",
+    )
+    word: str
+    id: Optional[str] = Field(default=None, description="MongoDB id of the pending entry.")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"status": "queued", "word": "MyProduct", "id": "664abc123"}
+        }
+    }
+
+
+class PendingWordEntry(BaseModel):
+    id: str
+    word: str
+    language: str
+    submitted_at: str
+    status: str
+    context: Optional[str] = None
+    reviewed_at: Optional[str] = None
+
+
+class PendingListResponse(BaseModel):
+    words: List[PendingWordEntry]
+    total: int
+    status_filter: str
+
+
 # ─── Health ───────────────────────────────────────────────────────────────────
 
 class HealthResponse(BaseModel):
-    status: str = Field(..., description="'ok' when the service is healthy.", examples=["ok"])
-    hunspell_available: bool = Field(
-        ...,
-        description="True when the spylls dictionary is loaded and ready.",
-    )
-    language: str = Field(
-        ...,
-        description="Active spell-check language (Hunspell dictionary key).",
-        examples=["he_IL"],
-    )
-    custom_dict_words: int = Field(
-        ...,
-        description="Number of words in the organisational dictionary.",
-        ge=0,
-    )
+    status: str = Field(..., description="'ok' when the service is healthy.")
+    hunspell_available: bool
+    language: str
+    custom_dict_words: int
+    storage_backend: str = Field(default="json", description="'mongodb' or 'json'")
+    pending_approvals: int = Field(default=0, description="Words awaiting admin approval.")
 
     model_config = {
         "json_schema_extra": {
@@ -258,6 +274,8 @@ class HealthResponse(BaseModel):
                 "hunspell_available": True,
                 "language": "he_IL",
                 "custom_dict_words": 18,
+                "storage_backend": "mongodb",
+                "pending_approvals": 3,
             }
         }
     }

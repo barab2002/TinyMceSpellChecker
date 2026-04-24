@@ -1,0 +1,471 @@
+{% extends "base.html" %}
+{% block title %}TinyMCE Spell-Check — Documentation{% endblock %}
+
+{% block content %}
+<style>
+  .docs-layout { display: grid; grid-template-columns: 240px 1fr; gap: 32px; max-width: 1280px; margin: 0 auto; padding: 24px 20px; align-items: start; }
+  .sidebar { position: sticky; top: 72px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px; }
+  .sidebar-title { font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); margin-bottom: 8px; }
+  .toc-link { display: block; padding: 5px 10px; font-size: .85rem; color: var(--text-sec); text-decoration: none; border-radius: 6px; transition: background var(--transition), color var(--transition); }
+  .toc-link:hover { background: var(--bg); color: var(--text); }
+  .toc-link.active { background: var(--primary-light); color: var(--primary); font-weight: 500; }
+  .toc-link.sub { padding-left: 20px; font-size: .8rem; }
+  .content { min-width: 0; }
+  .hero { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); color: #fff; border-radius: var(--radius-lg); padding: 40px 36px; margin-bottom: 32px; position: relative; overflow: hidden; }
+  .hero::before { content: ''; position: absolute; right: -40px; top: -40px; width: 300px; height: 300px; background: rgba(37,99,235,.15); border-radius: 50%; }
+  .hero-badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(37,99,235,.3); color: #93c5fd; border: 1px solid rgba(37,99,235,.4); padding: 4px 12px; border-radius: 99px; font-size: .8rem; font-weight: 600; margin-bottom: 16px; }
+  .hero h1 { font-size: 2rem; font-weight: 800; margin-bottom: 10px; line-height: 1.2; }
+  .hero p { color: #94a3b8; font-size: 1rem; max-width: 520px; line-height: 1.6; }
+  .hero-links { display: flex; gap: 10px; margin-top: 24px; flex-wrap: wrap; }
+  .hero-btn { padding: 10px 20px; border-radius: var(--radius); font-size: .875rem; font-weight: 600; text-decoration: none; transition: opacity .15s; }
+  .hero-btn-primary { background: var(--primary); color: #fff; }
+  .hero-btn-primary:hover { opacity: .9; }
+  .hero-btn-ghost { background: rgba(255,255,255,.1); color: #fff; border: 1px solid rgba(255,255,255,.2); }
+  .hero-btn-ghost:hover { background: rgba(255,255,255,.15); }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  .pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 99px; font-size: .78rem; font-weight: 600; border: 1px solid; }
+  .pill-blue { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+  .pill-green { background: #f0fdf4; color: #166534; border-color: #bbf7d0; }
+  .pill-gray { background: #f8fafc; color: #475569; border-color: #e2e8f0; }
+  section { margin-bottom: 40px; scroll-margin-top: 80px; }
+  section h2 { font-size: 1.35rem; font-weight: 700; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  section h3 { font-size: 1rem; font-weight: 600; margin: 20px 0 10px; }
+  section p { margin-bottom: 12px; color: var(--text-sec); line-height: 1.7; }
+  .feature-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+  .feature-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 18px; }
+  .feature-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-bottom: 10px; font-size: 1.1rem; }
+  .feature-card h4 { font-size: .9rem; font-weight: 600; margin-bottom: 5px; }
+  .feature-card p { font-size: .82rem; margin: 0; }
+  .step { display: flex; gap: 14px; margin-bottom: 20px; }
+  .step-num { flex-shrink: 0; width: 28px; height: 28px; background: var(--primary); color: #fff; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: .8rem; font-weight: 700; }
+  .step-content { flex: 1; }
+  .step-title { font-weight: 600; margin-bottom: 6px; }
+  .api-endpoint { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 12px; overflow: hidden; }
+  .api-header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; }
+  .api-header:hover { background: #f8fafc; }
+  .method { font-family: monospace; font-size: .8rem; font-weight: 700; padding: 3px 8px; border-radius: 4px; min-width: 48px; text-align: center; }
+  .method-get { background: #d1fae5; color: #065f46; }
+  .method-post { background: #dbeafe; color: #1e40af; }
+  .api-path { font-family: monospace; font-size: .9rem; font-weight: 500; }
+  .api-desc { color: var(--text-muted); font-size: .82rem; margin-left: auto; }
+  .api-body { padding: 0 16px 16px; border-top: 1px solid var(--border); display: none; }
+  .api-body.open { display: block; }
+  .api-body pre { margin-top: 10px; }
+  .env-table { width: 100%; border-collapse: collapse; }
+  .env-table th { text-align: left; padding: 8px 12px; background: #f8fafc; font-size: .78rem; font-weight: 700; color: var(--text-sec); text-transform: uppercase; letter-spacing: .05em; border: 1px solid var(--border); }
+  .env-table td { padding: 10px 12px; border: 1px solid var(--border); font-size: .875rem; vertical-align: top; }
+  .env-var { font-family: monospace; font-size: .85rem; color: var(--primary); font-weight: 600; }
+  .env-default { font-family: monospace; font-size: .8rem; color: var(--text-muted); }
+  .copy-btn { float: right; padding: 3px 10px; font-size: .75rem; background: rgba(255,255,255,.1); color: #94a3b8; border: 1px solid rgba(255,255,255,.15); border-radius: 4px; cursor: pointer; transition: background .15s; }
+  .copy-btn:hover { background: rgba(255,255,255,.2); color: #fff; }
+  @media (max-width: 900px) { .docs-layout { grid-template-columns: 1fr; } .sidebar { display: none; } }
+</style>
+
+<div class="docs-layout">
+  <!-- Sidebar TOC -->
+  <aside class="sidebar">
+    <div class="sidebar-title">On this page</div>
+    <a class="toc-link" href="#overview">Overview</a>
+    <a class="toc-link" href="#quickstart">Quick Start</a>
+    <a class="toc-link sub" href="#docker">Docker Compose</a>
+    <a class="toc-link sub" href="#local">Local Python</a>
+    <a class="toc-link" href="#plugin">Plugin Integration</a>
+    <a class="toc-link sub" href="#minimal">Minimal Setup</a>
+    <a class="toc-link sub" href="#full-options">All Options</a>
+    <a class="toc-link" href="#languages">Languages</a>
+    <a class="toc-link" href="#mongodb">MongoDB Setup</a>
+    <a class="toc-link" href="#approvals">Approval Workflow</a>
+    <a class="toc-link" href="#api">API Reference</a>
+    <a class="toc-link" href="#env">Environment Variables</a>
+    <a class="toc-link" href="#troubleshooting">Troubleshooting</a>
+  </aside>
+
+  <!-- Main content -->
+  <main class="content">
+
+    <!-- Hero -->
+    <div class="hero">
+      <div class="hero-badge">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+        v{{ version }} · Multi-language
+      </div>
+      <h1>TinyMCE Spell-Check</h1>
+      <p>A production-ready, self-hosted spell-check service for TinyMCE v7. Supports Hebrew, English, and Arabic. No cloud services. Runs entirely on your network.</p>
+      <div class="badges">
+        {% for lang in languages %}<span class="pill pill-blue">{{ lang }}</span>{% endfor %}
+        <span class="pill pill-green">Storage: {{ storage_backend }}</span>
+        <span class="pill pill-gray">FastAPI + Hunspell</span>
+      </div>
+      <div class="hero-links">
+        <a class="hero-btn hero-btn-primary" href="/dictionary">Dictionary Manager</a>
+        <a class="hero-btn hero-btn-ghost" href="/approvals">Word Approvals</a>
+        <a class="hero-btn hero-btn-ghost" href="/docs" target="_blank">Swagger UI ↗</a>
+      </div>
+    </div>
+
+    <!-- Overview -->
+    <section id="overview">
+      <h2>Overview</h2>
+      <div class="feature-grid">
+        <div class="feature-card"><div class="feature-icon" style="background:#eff6ff;">🇮🇱</div><h4>Hebrew Spell-Check</h4><p>469k words, nikud stripping, maqaf splitting, geresh normalization.</p></div>
+        <div class="feature-card"><div class="feature-icon" style="background:#f0fdf4;">🇺🇸</div><h4>English Support</h4><p>en-US and en-GB dictionaries, auto-discovered from the dict folder.</p></div>
+        <div class="feature-card"><div class="feature-icon" style="background:#fffbeb;">🇸🇦</div><h4>Arabic Support</h4><p>Tashkeel diacritic stripping, ar-SA dictionary.</p></div>
+        <div class="feature-card"><div class="feature-icon" style="background:#fdf4ff;">🗄️</div><h4>MongoDB Dictionary</h4><p>Org dictionary backed by MongoDB with pending-approval workflow.</p></div>
+        <div class="feature-card"><div class="feature-icon" style="background:#fef2f2;">✅</div><h4>Word Approvals</h4><p>Plugin users suggest words; admins approve or dismiss from the GUI.</p></div>
+        <div class="feature-card"><div class="feature-icon" style="background:#f0f9ff;">⚡</div><h4>High Performance</h4><p>In-memory caches, thread-pool executor, GZip compression.</p></div>
+      </div>
+    </section>
+
+    <!-- Quick Start -->
+    <section id="quickstart">
+      <h2>Quick Start</h2>
+
+      <h3 id="docker">Option A — Docker Compose (recommended)</h3>
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content">
+          <div class="step-title">Clone and configure</div>
+          <pre><code>git clone https://github.com/barab2002/TinyMceSpellChecker.git
+cd TinyMceSpellChecker
+cp .env.example .env        # edit as needed</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content">
+          <div class="step-title">Start everything</div>
+          <pre><code>docker compose up -d --build
+
+# API:         http://localhost:8000
+# Docs:        http://localhost:8000/
+# Dictionary:  http://localhost:8000/dictionary
+# Approvals:   http://localhost:8000/approvals
+# Swagger:     http://localhost:8000/docs</code></pre>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-content">
+          <div class="step-title">Verify</div>
+          <pre><code>curl http://localhost:8000/health</code></pre>
+        </div>
+      </div>
+
+      <h3 id="local">Option B — Local Python</h3>
+      <pre><code>cd backend
+python -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000</code></pre>
+    </section>
+
+    <!-- Plugin Integration -->
+    <section id="plugin">
+      <h2>Plugin Integration</h2>
+      <p>Copy <code>plugin/hebrewspellcheck/plugin.js</code> into your app's static assets, then configure TinyMCE.</p>
+
+      <h3 id="minimal">Minimal (3 required options)</h3>
+      <pre><code>tinymce.init({
+  selector: '#my-editor',
+  external_plugins: {
+    hebrewspellcheck: '/static/plugins/hebrewspellcheck/plugin.js',
+  },
+  toolbar: 'hebrewspellcheck hebrewspellcheck_clear | bold italic',
+  hebrewspellcheck_api_url: 'http://localhost:8000',     // ← your API
+  extended_valid_elements: 'span[class|data-word|data-suggestions]',
+  browser_spellcheck: false,
+});</code></pre>
+
+      <h3 id="full-options">All Plugin Options</h3>
+      <pre><code>tinymce.init({
+  selector: '#my-editor',
+  external_plugins: {
+    hebrewspellcheck: '/static/plugins/hebrewspellcheck/plugin.js',
+  },
+  toolbar: 'hebrewspellcheck hebrewspellcheck_clear | bold italic',
+
+  // ── Required ──────────────────────────────────────────────────────
+  hebrewspellcheck_api_url: 'http://your-api:8000',
+
+  // ── Language ──────────────────────────────────────────────────────
+  hebrewspellcheck_language: 'he-IL',   // he-IL | en-US | en-GB | ar-SA
+
+  // ── Suggestions ───────────────────────────────────────────────────
+  hebrewspellcheck_max_suggestions: 5,  // 1–20
+
+  // ── GrowthBook feature flag (optional) ────────────────────────────
+  hebrewspellcheck_growthbook_api_url: 'https://cdn.growthbook.io',
+  hebrewspellcheck_growthbook_client_key: 'sdk-...',
+  hebrewspellcheck_growthbook_feature_key: 'spellcheck-add-to-dict',
+
+  // ── Content policy ────────────────────────────────────────────────
+  extended_valid_elements: 'span[class|data-word|data-suggestions]',
+  browser_spellcheck: false,
+  gecko_spellcheck: false,
+  directionality: 'rtl',   // for Hebrew / Arabic
+});</code></pre>
+
+      <h3>Toolbar Buttons</h3>
+      <table class="env-table">
+        <tr><th>Button ID</th><th>Label</th><th>Action</th></tr>
+        <tr><td class="env-var">hebrewspellcheck</td><td>בדיקת איות</td><td>Run spell-check on the full document</td></tr>
+        <tr><td class="env-var">hebrewspellcheck_clear</td><td>נקה סימונים</td><td>Remove all red underlines</td></tr>
+      </table>
+
+      <h3>Popover Actions (when clicking a red word)</h3>
+      <table class="env-table">
+        <tr><th>Action</th><th>What it does</th></tr>
+        <tr><td>• suggestion</td><td>Replace the word with that suggestion</td></tr>
+        <tr><td>התעלם כאן</td><td>Remove this highlight, keep the word</td></tr>
+        <tr><td>התעלם בכל המסמך</td><td>Remove all highlights for this word</td></tr>
+        <tr><td>הוסף למילון</td><td>Send word for admin approval (→ /approvals)</td></tr>
+      </table>
+    </section>
+
+    <!-- Languages -->
+    <section id="languages">
+      <h2>Language Configuration</h2>
+      <p>By default, <strong>all</strong> dictionaries found in <code>backend/dictionaries/</code> are loaded. Set <code>SPELLCHECK_LANGUAGES</code> to restrict which languages are active.</p>
+      <pre><code># .env — load only Hebrew and English
+SPELLCHECK_LANGUAGES=he-IL,en-US
+
+# load all available dictionaries (default — leave empty)
+SPELLCHECK_LANGUAGES=</code></pre>
+      <p>To add a new language, drop its <code>.aff</code> and <code>.dic</code> files into <code>backend/dictionaries/</code> and restart. The service auto-discovers them.</p>
+      <table class="env-table">
+        <tr><th>Code</th><th>Language</th><th>File pair</th></tr>
+        <tr><td class="env-var">he-IL</td><td>Hebrew (Israel)</td><td>he_IL.aff / he_IL.dic</td></tr>
+        <tr><td class="env-var">en-US</td><td>English (US)</td><td>en_US.aff / en_US.dic</td></tr>
+        <tr><td class="env-var">en-GB</td><td>English (UK)</td><td>en_GB.aff / en_GB.dic</td></tr>
+        <tr><td class="env-var">ar-SA</td><td>Arabic (Saudi Arabia)</td><td>ar_SA.aff / ar_SA.dic</td></tr>
+      </table>
+    </section>
+
+    <!-- MongoDB -->
+    <section id="mongodb">
+      <h2>MongoDB Setup</h2>
+      <p>When <code>SPELLCHECK_MONGO_URI</code> is set, the organisational dictionary switches from a local JSON file to MongoDB. This enables the <strong>word approval workflow</strong>.</p>
+
+      <h3>Step 1 — Add to .env</h3>
+      <pre><code># Local MongoDB
+SPELLCHECK_MONGO_URI=mongodb://localhost:27017
+
+# MongoDB Atlas (cloud)
+SPELLCHECK_MONGO_URI=mongodb+srv://user:pass@cluster.mongodb.net
+
+# Database name (default: spellcheck)
+SPELLCHECK_MONGO_DB=spellcheck</code></pre>
+
+      <h3>Step 2 — Start with MongoDB in Docker Compose</h3>
+      <pre><code># docker-compose.yml already includes a MongoDB service.
+# Just make sure SPELLCHECK_MONGO_URI is set in .env:
+docker compose up -d --build</code></pre>
+
+      <h3>Collections created automatically</h3>
+      <table class="env-table">
+        <tr><th>Collection</th><th>Purpose</th></tr>
+        <tr><td class="env-var">approved_words</td><td>Words accepted during spell-check. Indexed on <code>word</code> (unique) and <code>language</code>.</td></tr>
+        <tr><td class="env-var">pending_words</td><td>Words suggested by plugin users. Status: <code>pending</code> → <code>approved</code> / <code>dismissed</code>.</td></tr>
+      </table>
+
+      <h3>Migration from JSON</h3>
+      <p>If <code>org_dictionary.json</code> already has words, they are automatically migrated to MongoDB on first startup (idempotent — running again is safe).</p>
+
+      <h3>Fallback behaviour</h3>
+      <p>If MongoDB is unavailable at startup, the service falls back to the JSON file and logs a warning. Spell-checking continues without interruption.</p>
+    </section>
+
+    <!-- Approval Workflow -->
+    <section id="approvals">
+      <h2>Word Approval Workflow</h2>
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-content"><div class="step-title">User clicks "הוסף למילון"</div><p>The TinyMCE plugin calls <code>POST /dictionary/suggest</code>. The word is stored in the <code>pending_words</code> MongoDB collection.</p></div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-content"><div class="step-title">Admin opens <a href="/approvals">/approvals</a></div><p>The approval GUI shows all pending words with language, submission date, and optional context.</p></div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-content"><div class="step-title">Admin approves or dismisses</div><p><strong>Approve:</strong> word moves to <code>approved_words</code> and is accepted immediately (in-memory cache updated, no restart needed).<br><strong>Dismiss:</strong> word is marked dismissed and remains flagged as a misspelling.</p></div>
+      </div>
+      <p style="margin-top:12px;"><strong>Without MongoDB:</strong> clicking "הוסף למילון" adds the word directly to the JSON dictionary (no approval step — same as previous behaviour).</p>
+    </section>
+
+    <!-- API Reference -->
+    <section id="api">
+      <h2>API Reference</h2>
+      <p>Full interactive docs with runnable examples are at <a href="/docs" target="_blank">/docs</a> (Swagger UI).</p>
+
+      <div class="api-endpoint">
+        <div class="api-header" onclick="toggleApi(this)">
+          <span class="method method-post">POST</span>
+          <span class="api-path">/spell/check</span>
+          <span class="api-desc">Check text for spelling errors</span>
+          <span style="margin-left:auto;color:var(--text-muted)">▼</span>
+        </div>
+        <div class="api-body">
+          <pre><code># Request
+{
+  "text": "שלומ לכולם",
+  "language": "he-IL",
+  "options": { "includeSuggestions": true, "maxSuggestions": 5 }
+}
+
+# Response
+{
+  "language": "he-IL",
+  "misspellings": [
+    { "word": "שלומ", "start": 0, "end": 4, "suggestions": ["שלום"], "source": "hunspell" }
+  ],
+  "total": 1
+}</code></pre>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="api-header" onclick="toggleApi(this)">
+          <span class="method method-get">GET</span>
+          <span class="api-path">/dictionary</span>
+          <span class="api-desc">List all approved words</span>
+          <span style="margin-left:auto;color:var(--text-muted)">▼</span>
+        </div>
+        <div class="api-body">
+          <pre><code>curl http://localhost:8000/dictionary -H "Accept: application/json"
+# { "words": ["Salesforce", "ZoomInfo"], "count": 2 }</code></pre>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="api-header" onclick="toggleApi(this)">
+          <span class="method method-post">POST</span>
+          <span class="api-path">/dictionary/suggest</span>
+          <span class="api-desc">Suggest a word for approval (plugin)</span>
+          <span style="margin-left:auto;color:var(--text-muted)">▼</span>
+        </div>
+        <div class="api-body">
+          <pre><code>curl -X POST http://localhost:8000/dictionary/suggest \
+  -H "Content-Type: application/json" \
+  -d '{"word": "MyProduct", "language": "he-IL"}'
+# { "status": "queued", "word": "MyProduct", "id": "664abc..." }</code></pre>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="api-header" onclick="toggleApi(this)">
+          <span class="method method-post">POST</span>
+          <span class="api-path">/dictionary/add</span>
+          <span class="api-desc">Add a word directly (admin)</span>
+          <span style="margin-left:auto;color:var(--text-muted)">▼</span>
+        </div>
+        <div class="api-body">
+          <pre><code>curl -X POST http://localhost:8000/dictionary/add \
+  -H "Content-Type: application/json" \
+  -d '{"word": "MyProduct", "language": "all"}'</code></pre>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="api-header" onclick="toggleApi(this)">
+          <span class="method method-get">GET</span>
+          <span class="api-path">/dictionary/pending</span>
+          <span class="api-desc">List pending word suggestions</span>
+          <span style="margin-left:auto;color:var(--text-muted)">▼</span>
+        </div>
+        <div class="api-body">
+          <pre><code>curl "http://localhost:8000/dictionary/pending?status=pending"
+# { "words": [...], "total": 5, "status_filter": "pending" }</code></pre>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="api-header" onclick="toggleApi(this)">
+          <span class="method method-post">POST</span>
+          <span class="api-path">/dictionary/pending/{id}/approve</span>
+          <span class="api-desc">Approve a pending word</span>
+          <span style="margin-left:auto;color:var(--text-muted)">▼</span>
+        </div>
+        <div class="api-body">
+          <pre><code>curl -X POST http://localhost:8000/dictionary/pending/664abc.../approve
+# { "status": "approved", "word": "MyProduct" }</code></pre>
+        </div>
+      </div>
+
+      <div class="api-endpoint">
+        <div class="api-header" onclick="toggleApi(this)">
+          <span class="method method-get">GET</span>
+          <span class="api-path">/health</span>
+          <span class="api-desc">Service health check</span>
+          <span style="margin-left:auto;color:var(--text-muted)">▼</span>
+        </div>
+        <div class="api-body">
+          <pre><code>curl http://localhost:8000/health
+# { "status":"ok", "hunspell_available":true, "storage_backend":"mongodb",
+#   "pending_approvals":3, "custom_dict_words":42 }</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Environment Variables -->
+    <section id="env">
+      <h2>Environment Variables</h2>
+      <p>All variables use the <code>SPELLCHECK_</code> prefix. Copy <code>.env.example</code> → <code>.env</code> and edit.</p>
+      <table class="env-table">
+        <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+        <tr><td class="env-var">SPELLCHECK_HOST</td><td class="env-default">0.0.0.0</td><td>Bind address</td></tr>
+        <tr><td class="env-var">SPELLCHECK_PORT</td><td class="env-default">8000</td><td>API port</td></tr>
+        <tr><td class="env-var">SPELLCHECK_CORS_ORIGINS</td><td class="env-default">*</td><td>Allowed CORS origins, comma-separated</td></tr>
+        <tr><td class="env-var">SPELLCHECK_LANGUAGES</td><td class="env-default">(empty = all)</td><td>Comma-separated list of enabled language codes, e.g. <code>he-IL,en-US</code></td></tr>
+        <tr><td class="env-var">SPELLCHECK_DEFAULT_LANGUAGE</td><td class="env-default">he_IL</td><td>Default language when none specified in request</td></tr>
+        <tr><td class="env-var">SPELLCHECK_MONGO_URI</td><td class="env-default">(empty)</td><td>MongoDB connection string. Leave empty to use JSON file storage.</td></tr>
+        <tr><td class="env-var">SPELLCHECK_MONGO_DB</td><td class="env-default">spellcheck</td><td>MongoDB database name</td></tr>
+        <tr><td class="env-var">SPELLCHECK_HUNSPELL_DICT_DIR</td><td class="env-default">/app/dictionaries</td><td>Path to directory containing .aff/.dic pairs</td></tr>
+        <tr><td class="env-var">SPELLCHECK_CUSTOM_DICT_PATH</td><td class="env-default">/app/dictionaries/custom/org_dictionary.json</td><td>JSON fallback dictionary path (used when MongoDB is not configured)</td></tr>
+        <tr><td class="env-var">SPELLCHECK_MAX_TEXT_LENGTH</td><td class="env-default">200000</td><td>Maximum characters per spell-check request</td></tr>
+        <tr><td class="env-var">SPELLCHECK_MAX_SUGGESTIONS</td><td class="env-default">5</td><td>Default max suggestions per misspelled word</td></tr>
+        <tr><td class="env-var">SPELLCHECK_LOG_LEVEL</td><td class="env-default">INFO</td><td>DEBUG / INFO / WARNING / ERROR</td></tr>
+      </table>
+    </section>
+
+    <!-- Troubleshooting -->
+    <section id="troubleshooting">
+      <h2>Troubleshooting</h2>
+      <table class="env-table">
+        <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+        <tr><td>CORS error in browser</td><td>Origin not allowed</td><td>Add your app origin to <code>SPELLCHECK_CORS_ORIGINS</code></td></tr>
+        <tr><td>Words not highlighted</td><td>Missing <code>extended_valid_elements</code></td><td>Add <code>extended_valid_elements: 'span[class|data-word|data-suggestions]'</code></td></tr>
+        <tr><td>Plugin not loading</td><td>Wrong file path</td><td>Verify <code>plugin.js</code> is accessible at the URL in <code>external_plugins</code></td></tr>
+        <tr><td>MongoDB not connecting</td><td>Wrong URI or network</td><td>Check <code>SPELLCHECK_MONGO_URI</code>; service falls back to JSON if unavailable</td></tr>
+        <tr><td>Language not available</td><td>Missing dictionary files</td><td>Copy <code>.aff</code>/<code>.dic</code> pair into <code>backend/dictionaries/</code></td></tr>
+        <tr><td>Approval queue empty</td><td>MongoDB not configured</td><td>Set <code>SPELLCHECK_MONGO_URI</code> to enable approval workflow</td></tr>
+      </table>
+    </section>
+
+  </main>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function toggleApi(header) {
+    const body = header.nextElementSibling;
+    body.classList.toggle('open');
+    const arrow = header.querySelector('span:last-child');
+    arrow.textContent = body.classList.contains('open') ? '▲' : '▼';
+  }
+
+  // Highlight active TOC link on scroll
+  const sections = document.querySelectorAll('section[id]');
+  const tocLinks = document.querySelectorAll('.toc-link');
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        tocLinks.forEach(l => l.classList.remove('active'));
+        const link = document.querySelector(`.toc-link[href="#${e.target.id}"]`);
+        if (link) link.classList.add('active');
+      }
+    });
+  }, { threshold: .3 });
+  sections.forEach(s => observer.observe(s));
+</script>
+{% endblock %}

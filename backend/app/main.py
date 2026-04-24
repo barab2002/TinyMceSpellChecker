@@ -1,21 +1,18 @@
 """
-Hebrew Spell-Check API — FastAPI entry point.
+Multi-language Spell-Check API — FastAPI entry point.
 
-Local dev:
-  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-Docker:
-  docker compose up --build
-
-Swagger UI: http://localhost:8000/docs
+Local dev:  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+Docker:     docker compose up --build
 """
 import logging
 import sys
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import ORJSONResponse
+from fastapi.templating import Jinja2Templates
 from pythonjsonlogger import jsonlogger
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -27,6 +24,7 @@ from .models.schemas import HealthResponse
 from .routes import dictionary as dict_router
 from .routes import spell as spell_router
 from .services.dictionary_service import DictionaryService
+from .services.mongo_service import MongoService
 from .services.spell_service import SpellService
 
 
@@ -45,22 +43,42 @@ def _setup_logging() -> None:
 _setup_logging()
 logger = logging.getLogger(__name__)
 
+templates = Jinja2Templates(directory="app/templates")
+
+
+# ─── Language discovery ───────────────────────────────────────────────────────
+
+def _discover_languages(dict_dir: str) -> list[str]:
+    """Return language codes for every .aff/.dic pair found in dict_dir."""
+    path = Path(dict_dir)
+    if not path.exists():
+        return []
+    found = []
+    for aff in path.glob("*.aff"):
+        lang = aff.stem  # e.g. "he_IL"
+        if (path / f"{lang}.dic").exists():
+            found.append(lang)
+    return sorted(found)
+
 
 # ─── App factory ──────────────────────────────────────────────────────────────
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Hebrew Spell-Check API",
-        summary="Internal Hebrew spell-check service for TinyMCE v7.",
+        title="TinyMCE Multi-Language Spell-Check API",
+        summary="Private-network spell-check backend with Hebrew, English, and Arabic support.",
         description="""
 ## Overview
 
-A **private-network** spell-check backend using [spylls](https://github.com/zverok/spylls)
-(pure-Python Hunspell) and a bundled `he_IL` Hebrew dictionary.
-
+A production-ready spell-check backend for [TinyMCE v7](https://www.tiny.cloud/).
 No cloud services. No external dependencies at runtime.
 
-## Quick test
+**Supported languages** (configured via `SPELLCHECK_LANGUAGES`):
+- `he-IL` — Hebrew (469k words, hspell 1.4)
+- `en-US` / `en-GB` — English
+- `ar-SA` / `ar` — Arabic
+
+## Quick start
 
 ```bash
 curl -s http://localhost:8000/health
@@ -69,40 +87,21 @@ curl -s -X POST http://localhost:8000/spell/check \\
      -d '{"text":"שלומ לכולם","language":"he-IL"}'
 ```
 
-## TinyMCE integration
+## Admin interfaces
 
-```js
-tinymce.init({
-  external_plugins: { hebrewspellcheck: '/plugin/hebrewspellcheck/plugin.js' },
-  toolbar: 'hebrewspellcheck hebrewspellcheck_clear hebrewspellcheck_toggle_auto hebrewspellcheck_dictionary | bold italic',
-  hebrewspellcheck_api_url: 'http://localhost:8000',
-  extended_valid_elements: 'span[class|data-word|data-suggestions]',
-  browser_spellcheck: false,
-});
-```
+- **Dictionary manager** → [/dictionary](/dictionary)
+- **Word approvals** → [/approvals](/approvals)
+- **Swagger UI** → [/docs](/docs)
         """,
-        version="1.1.0",
+        version="2.0.0",
         contact={"name": "Internal Tools Team"},
         docs_url="/docs",
         redoc_url="/redoc",
-        # Use orjson for all JSON responses — 3-5× faster serialisation
         default_response_class=ORJSONResponse,
         openapi_tags=[
-            {
-                "name": "Spell Check",
-                "description": "Submit plain text and receive a list of misspelled Hebrew words with suggestions.",
-            },
-            {
-                "name": "Dictionary",
-                "description": (
-                    "Manage the organisational word list. "
-                    "Words added here are always accepted — even if Hunspell flags them."
-                ),
-            },
-            {
-                "name": "System",
-                "description": "Health check and service information.",
-            },
+            {"name": "Spell Check", "description": "Submit plain text and get misspelled words with suggestions."},
+            {"name": "Dictionary", "description": "Manage the organisational word list and approval queue."},
+            {"name": "System", "description": "Health check and service information."},
         ],
     )
 
@@ -111,35 +110,78 @@ tinymce.init({
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     app.add_middleware(SlowAPIMiddleware)
 
-    # ── GZip compression (helps large responses) ──
+    # ── GZip ──
     app.add_middleware(GZipMiddleware, minimum_size=500)
 
     # ── CORS ──
-    # NOTE: allow_credentials=True is incompatible with allow_origins=["*"].
-    # Browsers (and Swagger "Try it out") reject credentialed wildcard CORS.
-    # We use allow_credentials=False which is correct for a public JSON API.
     origins = settings.cors_origins_list
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
         allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Accept", "Authorization"],
         max_age=3600,
     )
 
-    # ── Services (singletons on app.state) ──
-    app.state.spell_service = SpellService(
-        dict_dir=settings.hunspell_dict_dir,
-        language=settings.default_language,
-    )
+    # ── MongoDB (optional) ──
+    mongo_svc = MongoService(uri=settings.mongo_uri, db_name=settings.mongo_db)
+    app.state.mongo_service = mongo_svc
+
+    # ── Dictionary service ──
     app.state.dict_service = DictionaryService(
-        dict_path=settings.custom_dict_path
+        dict_path=settings.custom_dict_path,
+        mongo_service=mongo_svc if mongo_svc.is_available() else None,
     )
 
+    # ── Language discovery ──
+    all_available = _discover_languages(settings.hunspell_dict_dir)
+    enabled = settings.enabled_languages
+    if enabled:
+        # Filter to only the explicitly requested languages
+        norm = {lang.replace("-", "_") for lang in enabled}
+        active_langs = [lang for lang in all_available if lang in norm]
+        if not active_langs:
+            logger.warning(
+                "SPELLCHECK_LANGUAGES=%s matched no dictionary files in %s. "
+                "Available: %s. Falling back to all.",
+                settings.languages,
+                settings.hunspell_dict_dir,
+                all_available,
+            )
+            active_langs = all_available
+    else:
+        active_langs = all_available
+
+    # Store display-friendly language codes for the GUI (he_IL → he-IL)
+    app.state.available_languages = [lang.replace("_", "-") for lang in active_langs]
+    logger.info("Active languages: %s", active_langs)
+
+    # ── Spell services (one per language) ──
+    default_lang_fs = settings.default_language.replace("-", "_")
+    spell_services: dict[str, SpellService] = {}
+
+    for lang in active_langs:
+        svc = SpellService(dict_dir=settings.hunspell_dict_dir, language=lang)
+        if svc.is_available():
+            spell_services[lang] = svc
+            bcp47 = lang.replace("_", "-")
+            spell_services[bcp47] = svc
+
+    # Ensure the default language is reachable
+    if default_lang_fs not in spell_services and spell_services:
+        first_key = next(iter(spell_services))
+        spell_services[default_lang_fs] = spell_services[first_key]
+
+    # ── Keep app.state.spell_service for backwards compat ──
+    app.state.spell_service = spell_services.get(
+        default_lang_fs, next(iter(spell_services.values())) if spell_services else None
+    )
+    app.state.spell_services = spell_services
+
     # ── Routers ──
-    app.include_router(spell_router.router,  prefix="/spell",      tags=["Spell Check"])
-    app.include_router(dict_router.router,   prefix="/dictionary", tags=["Dictionary"])
+    app.include_router(spell_router.router, prefix="/spell", tags=["Spell Check"])
+    app.include_router(dict_router.router, prefix="/dictionary", tags=["Dictionary"])
 
     # ── Global error handler ──
     @app.exception_handler(Exception)
@@ -153,29 +195,59 @@ tinymce.init({
         response_model=HealthResponse,
         tags=["System"],
         summary="Service health check",
-        description=(
-            "Returns `status: ok` when the service is running.  "
-            "`hunspell_available: true` confirms the Hebrew dictionary is loaded."
-        ),
     )
     async def health(req: Request) -> HealthResponse:
-        spell_svc: SpellService      = req.app.state.spell_service
-        dict_svc:  DictionaryService = req.app.state.dict_service
+        spell_svc = req.app.state.spell_service
+        dict_svc = req.app.state.dict_service
+        mongo = req.app.state.mongo_service
         return HealthResponse(
             status="ok",
-            hunspell_available=spell_svc.is_available(),
+            hunspell_available=spell_svc.is_available() if spell_svc else False,
             language=settings.default_language,
             custom_dict_words=dict_svc.count(),
+            storage_backend="mongodb" if mongo.is_available() else "json",
+            pending_approvals=mongo.pending_count() if mongo.is_available() else 0,
         )
 
-    @app.get("/", tags=["System"], include_in_schema=False)
-    async def root() -> dict:
-        return {"message": "Hebrew Spell-Check API — Swagger UI at /docs"}
+    # ── Approvals GUI ──
+    @app.get("/approvals", include_in_schema=False)
+    async def approvals_page(req: Request):
+        mongo = req.app.state.mongo_service
+        pending_count = mongo.pending_count() if mongo.is_available() else 0
+        languages = getattr(req.app.state, "available_languages", [])
+        return templates.TemplateResponse(
+            "approvals.html",
+            {
+                "request": req,
+                "pending_count": pending_count,
+                "languages": languages,
+                "mongo_available": mongo.is_available(),
+            },
+        )
+
+    # ── Documentation root ──
+    @app.get("/", include_in_schema=False)
+    async def root(req: Request):
+        accept = req.headers.get("accept", "application/json")
+        if "text/html" in accept:
+            mongo = req.app.state.mongo_service
+            languages = getattr(req.app.state, "available_languages", [])
+            return templates.TemplateResponse(
+                "index.html",
+                {
+                    "request": req,
+                    "languages": languages,
+                    "mongo_available": mongo.is_available(),
+                    "storage_backend": "MongoDB" if mongo.is_available() else "JSON file",
+                    "version": "2.0.0",
+                },
+            )
+        return {"message": "TinyMCE Spell-Check API — docs at /docs, admin at /dictionary and /approvals"}
 
     logger.info(
-        "Startup complete | spell_engine=%s | lang=%s | cors=%s",
-        app.state.spell_service.is_available(),
-        settings.default_language,
+        "Startup complete | languages=%s | mongo=%s | cors=%s",
+        active_langs,
+        mongo_svc.is_available(),
         settings.cors_origins_list,
     )
 

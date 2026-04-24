@@ -111,18 +111,20 @@ if (typeof AbortSignal.timeout !== 'function') {
       return res.json();
     },
 
-    async addToDictionary(word) {
-      const res = await fetch(`${this._baseUrl}/dictionary/add`, {
+    async addToDictionary(word, language = 'he-IL') {
+      // Routes through the approval queue when MongoDB is configured.
+      // Falls back to direct-add when MongoDB is not available (backwards-compatible).
+      const res = await fetch(`${this._baseUrl}/dictionary/suggest`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ word }),
+        body: JSON.stringify({ word, language }),
         signal: AbortSignal.timeout(5000),
       });
       if (!res.ok) {
         const body = await res.text().catch(() => '');
         throw new Error(`Dictionary API error ${res.status}: ${body}`);
       }
-      return res.json();
+      return res.json(); // { status: "queued"|"added", word, id }
     },
 
     async removeFromDictionary(word) {
@@ -418,11 +420,15 @@ if (typeof AbortSignal.timeout !== 'function') {
 
       addRow('הוסף למילון', async () => {
         try {
-          await Api.addToDictionary(word);
+          const lang = editor.options.get('hebrewspellcheck_language') || 'he-IL';
+          const result = await Api.addToDictionary(word, lang);
           this._removeWordHighlights(word, editor);
           this.hide();
-          safeLog('click_add_to_dictionary', { word });
-          Notifier.show('המילה נוספה למילון בהצלחה ✓', 'success');
+          safeLog('click_add_to_dictionary', { word, status: result.status });
+          const msg = result.status === 'queued'
+            ? 'המילה נשלחה לאישור מנהל ✓'
+            : 'המילה נוספה למילון בהצלחה ✓';
+          Notifier.show(msg, 'success');
         } catch (err) {
           Notifier.show('שגיאה בהוספה למילון — בדוק שהשרת פועל', 'error');
         }
