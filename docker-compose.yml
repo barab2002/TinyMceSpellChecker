@@ -16,16 +16,37 @@ services:
       - SPELLCHECK_CORS_ORIGINS=${CORS_ORIGINS:-*}
       - SPELLCHECK_HUNSPELL_DICT_DIR=/app/dictionaries
       - SPELLCHECK_CUSTOM_DICT_PATH=/app/dictionaries/custom/org_dictionary.json
+      - SPELLCHECK_MONGO_URI=mongodb://mongo:27017
+      - SPELLCHECK_MONGO_DB=spellcheck
+      - SPELLCHECK_MONGO_COLLECTION=custom_dictionary
+      - SPELLCHECK_DICT_REFRESH_INTERVAL_MINUTES=${DICT_REFRESH_INTERVAL_MINUTES:-5}
       - SPELLCHECK_DEFAULT_LANGUAGE=he_IL
       - SPELLCHECK_MAX_TEXT_LENGTH=200000
       - SPELLCHECK_MAX_SUGGESTIONS=5
     volumes:
-      # Persist the custom dictionary across container restarts
+      # Mounted so the legacy JSON can seed MongoDB on first startup
       - ./backend/dictionaries/custom:/app/dictionaries/custom
       - ./backend/logs:/app/logs
+    depends_on:
+      mongo:
+        condition: service_healthy
     healthcheck:
       # Use Python (already in the image) instead of curl
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # MongoDB — durable store for the organisational custom dictionary.
+  mongo:
+    image: mongo:7
+    container_name: hebrew-spellcheck-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -46,3 +67,6 @@ services:
     depends_on:
       spellcheck-api:
         condition: service_healthy
+
+volumes:
+  mongo-data:

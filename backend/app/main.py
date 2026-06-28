@@ -9,8 +9,11 @@ Docker:
 
 Swagger UI: http://localhost:8000/docs
 """
+import asyncio
+import contextlib
 import logging
 import sys
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,10 +49,48 @@ _setup_logging()
 logger = logging.getLogger(__name__)
 
 
+# ─── Background dictionary refresh ──────────────────────────────────────────────
+
+async def _refresh_loop(dict_service, interval_minutes: float) -> None:
+    """Periodically reload the custom dictionary cache from MongoDB.
+
+    Runs the blocking Mongo read in a thread so the event loop stays free.
+    """
+    loop = asyncio.get_running_loop()
+    delay = interval_minutes * 60
+    while True:
+        try:
+            await asyncio.sleep(delay)
+            await loop.run_in_executor(None, dict_service.refresh)
+        except asyncio.CancelledError:
+            break
+        except Exception:  # pragma: no cover - defensive, keep the loop alive
+            logger.exception("Dictionary auto-refresh iteration failed")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    interval = settings.dict_refresh_interval_minutes
+    task = None
+    if interval and interval > 0:
+        task = asyncio.create_task(_refresh_loop(app.state.dict_service, interval))
+        logger.info("Dictionary auto-refresh enabled: every %s min", interval)
+    else:
+        logger.info("Dictionary auto-refresh disabled")
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
 # ─── App factory ──────────────────────────────────────────────────────────────
 
 def create_app() -> FastAPI:
     app = FastAPI(
+        lifespan=_lifespan,
         title="Hebrew Spell-Check API",
         summary="Internal Hebrew spell-check service for TinyMCE v7.",
         description="""
@@ -134,7 +175,10 @@ tinymce.init({
         language=settings.default_language,
     )
     app.state.dict_service = DictionaryService(
-        dict_path=settings.custom_dict_path
+        mongo_uri=settings.mongo_uri,
+        db_name=settings.mongo_db,
+        collection_name=settings.mongo_collection,
+        seed_json_path=settings.custom_dict_path,
     )
 
     # ── Routers ──
