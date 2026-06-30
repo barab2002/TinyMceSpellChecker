@@ -218,6 +218,42 @@ class SuggestWordResponse(BaseModel):
     }
 
 
+# ─── Approve-word callback schemas ─────────────────────────────────────────────
+
+class ApproveWordRequest(BaseModel):
+    word: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="The word approved for the organisational dictionary.",
+        examples=["Salesforce", "ZoomInfo", "MyProduct"],
+    )
+
+    @field_validator("word")
+    @classmethod
+    def no_control_chars(cls, v: str) -> str:
+        v = v.strip()
+        if re.search(r"[\x00-\x1f\x7f]", v):
+            raise ValueError("Word contains invalid control characters")
+        return v
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"word": "Salesforce"}
+        }
+    }
+
+
+class ApproveWordResponse(BaseModel):
+    added: bool = Field(..., description="True if the word was newly added, False if it was already present.")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"added": True}
+        }
+    }
+
+
 # ─── Health ───────────────────────────────────────────────────────────────────
 
 class HealthResponse(BaseModel):

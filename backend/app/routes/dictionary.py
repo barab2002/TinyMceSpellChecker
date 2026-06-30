@@ -1,6 +1,8 @@
 """
 Organisational dictionary endpoints:
   POST /dictionary/suggest — forward a word + context to the external approval service
+  POST /dictionary/approve — callback used by the external approval service to add an
+                              approved word to the organisational dictionary
 """
 import logging
 
@@ -9,7 +11,12 @@ from fastapi import APIRouter, HTTPException, Request
 
 from ..config import settings
 from ..limiter import limiter
-from ..models.schemas import SuggestWordRequest, SuggestWordResponse
+from ..models.schemas import (
+    ApproveWordRequest,
+    ApproveWordResponse,
+    SuggestWordRequest,
+    SuggestWordResponse,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -49,3 +56,25 @@ async def suggest_word(request: Request, body: SuggestWordRequest) -> SuggestWor
         )
 
     return SuggestWordResponse(status="ok")
+
+
+@router.post(
+    "/approve",
+    response_model=ApproveWordResponse,
+    summary="Add an approved word to the organisational dictionary",
+    description=(
+        "Callback for the external approval service: once a reviewer approves a word "
+        "suggested via `/dictionary/suggest`, the approval service calls this endpoint "
+        "to add it to the organisational dictionary."
+    ),
+)
+@limiter.limit("200/minute")
+async def approve_word(request: Request, body: ApproveWordRequest) -> ApproveWordResponse:
+    dict_service = request.app.state.dict_service
+    try:
+        added = dict_service.add(body.word)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return ApproveWordResponse(added=added)
