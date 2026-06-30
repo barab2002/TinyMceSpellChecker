@@ -176,13 +176,26 @@ if (typeof AbortSignal.timeout !== 'function') {
   }
 
   const CONTEXT_BLOCK_SELECTOR = 'p, div, li, td, th, blockquote, h1, h2, h3, h4, h5, h6';
-  const CONTEXT_MAX_LENGTH = 500;
+  const CONTEXT_WORD_COUNT = 5;
 
   function getWordContext(span) {
     const block = (span.closest && span.closest(CONTEXT_BLOCK_SELECTOR)) || span.parentElement;
     if (!block) return undefined;
-    const text = block.textContent.trim();
-    return text ? text.slice(0, CONTEXT_MAX_LENGTH) : undefined;
+
+    const doc = span.ownerDocument;
+    const beforeRange = doc.createRange();
+    beforeRange.setStart(block, 0);
+    beforeRange.setEndBefore(span);
+    const beforeWords = beforeRange.toString().trim().split(/\s+/).filter(Boolean).slice(-CONTEXT_WORD_COUNT);
+
+    const afterRange = doc.createRange();
+    afterRange.setStartAfter(span);
+    afterRange.setEnd(block, block.childNodes.length);
+    const afterWords = afterRange.toString().trim().split(/\s+/).filter(Boolean).slice(0, CONTEXT_WORD_COUNT);
+
+    const word = span.textContent.trim();
+    const text = [...beforeWords, word, ...afterWords].filter(Boolean).join(' ');
+    return text || undefined;
   }
 
   // ─── Highlighting ──────────────────────────────────────────────────────────
