@@ -575,7 +575,9 @@ This endpoint has **no authentication** — only expose it on a trusted network.
 
 Forward a word (and optional surrounding context) to the external approval
 service configured via `APPROVEIT_URL`. The plugin calls this when the user
-clicks **"הצע למילון"** on a misspelled word.
+clicks **"הצע למילון"** on a misspelled word. `context` is built client-side
+from the 5 words before and the 5 words after the misspelled word in its
+enclosing block (paragraph, list item, table cell, etc.).
 
 ```bash
 curl -X POST http://localhost:8000/dictionary/suggest \
