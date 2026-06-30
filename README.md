@@ -500,6 +500,8 @@ Pass these in your `tinymce.init()` call alongside the plugin registration.
 |---|---|---|
 | `hebrewspellcheck` | בדיקת איות | Run spell check on the full document |
 | `hebrewspellcheck_clear` | נקה סימונים | Remove all red underlines |
+| `hebrewspellcheck_toggle_auto` | בדיקה אוטומטית | Toggle auto-check while typing |
+| `hebrewspellcheck_manage_dict` | ניהול מילון ארגוני | Open a dialog to search the organisational dictionary and remove words |
 
 ### In-editor popover actions (when you click a red word)
 
@@ -574,17 +576,45 @@ these to find and highlight the exact text node in the editor.
 
 ### `GET /dictionary`
 
-List every word currently in the organisational dictionary.
+Search/list words in the organisational dictionary, paginated.
+
+| Query param | Default | Description |
+|---|---|---|
+| `q` | _(none)_ | Case-insensitive substring filter. |
+| `limit` | `50` | Page size (1–200). |
+| `offset` | `0` | Number of matching words to skip. |
 
 ```bash
-curl http://localhost:8000/dictionary
+curl "http://localhost:8000/dictionary?q=sales&limit=20&offset=0"
 ```
 
 ```json
-{ "words": ["Base44", "Clari", "HubSpot", "Salesforce", "ZoomInfo"], "count": 5 }
+{ "words": ["Salesforce"], "count": 1, "limit": 20, "offset": 0 }
 ```
 
+`count` is the total number of words matching `q` (across all pages), not
+just the words returned in this response.
+
 This endpoint has **no authentication** — only expose it on a trusted network.
+
+---
+
+### `DELETE /dictionary/{word}`
+
+Remove a word from the organisational dictionary. Used by the plugin's
+dictionary-management dialog (toolbar button "ניהול מילון ארגוני").
+
+```bash
+curl -X DELETE "http://localhost:8000/dictionary/MyProduct"
+```
+
+```json
+{ "removed": true }
+```
+
+`removed` is `false` if the word wasn't found. Returns `503` if MongoDB is
+unavailable. Like `/dictionary/approve`, this endpoint has **no
+authentication** — only expose it on a trusted network.
 
 ---
 

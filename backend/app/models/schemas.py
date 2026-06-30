@@ -223,15 +223,23 @@ class SuggestWordResponse(BaseModel):
 class DictionaryResponse(BaseModel):
     words: List[str] = Field(
         ...,
-        description="All words currently in the organisational dictionary, sorted alphabetically.",
+        description="The current page of words, sorted alphabetically.",
     )
-    count: int = Field(..., description="Total number of words in the dictionary.", ge=0)
+    count: int = Field(
+        ...,
+        description="Total number of words matching the query (across all pages).",
+        ge=0,
+    )
+    limit: int = Field(..., description="Page size used for this response.", ge=1)
+    offset: int = Field(..., description="Offset used for this response.", ge=0)
 
     model_config = {
         "json_schema_extra": {
             "example": {
                 "words": ["Base44", "Clari", "HubSpot", "Salesforce", "ZoomInfo"],
                 "count": 5,
+                "limit": 50,
+                "offset": 0,
             }
         }
     }
@@ -269,6 +277,18 @@ class ApproveWordResponse(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {"added": True}
+        }
+    }
+
+
+# ─── Remove-word schema ────────────────────────────────────────────────────────
+
+class RemoveWordResponse(BaseModel):
+    removed: bool = Field(..., description="True if the word was present and removed, False if it wasn't found.")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"removed": True}
         }
     }
 

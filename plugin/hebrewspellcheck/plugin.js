@@ -24,7 +24,7 @@ if (typeof AbortSignal.timeout !== 'function') {
  *     external_plugins: {
  *       hebrewspellcheck: '/plugin/hebrewspellcheck/plugin.js',
  *     },
- *     toolbar: 'hebrewspellcheck hebrewspellcheck_clear hebrewspellcheck_toggle_auto | bold italic ...',
+ *     toolbar: 'hebrewspellcheck hebrewspellcheck_clear hebrewspellcheck_toggle_auto hebrewspellcheck_manage_dict | bold italic ...',
  *     extended_valid_elements: 'span[class|data-word|data-suggestions]',
  *     browser_spellcheck: false,
  *
@@ -41,6 +41,7 @@ if (typeof AbortSignal.timeout !== 'function') {
  *  • hebrewspellcheck          — run spell-check manually
  *  • hebrewspellcheck_clear    — remove all highlights
  *  • hebrewspellcheck_toggle_auto — toggle auto-check while typing
+ *  • hebrewspellcheck_manage_dict — browse/search/remove words from the organisational dictionary
  */
 
 /* global tinymce */
@@ -55,6 +56,8 @@ if (typeof AbortSignal.timeout !== 'function') {
   const POPOVER_ID      = 'mce-spellcheck-popover';
   const STYLE_ID        = 'mce-spellcheck-styles';
   const AUTO_CHECK_DEBOUNCE_MS = 1500;
+  const DICT_PAGE_SIZE  = 50;
+  const DICT_SEARCH_DEBOUNCE_MS = 400;
 
   let pluginLogger = null;
   function safeLog(message, payload) {
@@ -117,6 +120,34 @@ if (typeof AbortSignal.timeout !== 'function') {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Dictionary API error ${res.status}: ${text}`);
+      }
+      return res.json();
+    },
+
+    async listDictionary({ q, limit, offset } = {}) {
+      const params = new URLSearchParams();
+      if (q) params.set('q', q);
+      if (limit != null) params.set('limit', limit);
+      if (offset != null) params.set('offset', offset);
+      const res = await fetch(`${this._baseUrl}/dictionary?${params.toString()}`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Dictionary API error ${res.status}: ${text}`);
+      }
+      return res.json();
+    },
+
+    async removeWord(word) {
+      const res = await fetch(`${this._baseUrl}/dictionary/${encodeURIComponent(word)}`, {
+        method: 'DELETE',
         signal: AbortSignal.timeout(5000),
       });
       if (!res.ok) {
@@ -501,6 +532,153 @@ if (typeof AbortSignal.timeout !== 'function') {
     },
   };
 
+  // ─── Dictionary management dialog ──────────────────────────────────────────
+  // Browse/search the organisational dictionary and remove words, via TinyMCE's
+  // native dialog API. Dynamic content (the word list) is rendered as an
+  // `htmlpanel` and refreshed with `dialogApi.redial()` after each fetch —
+  // TinyMCE dialogs have no live-bindable list/grid component, so the panel's
+  // HTML is rebuilt from scratch on every update (this does reset focus on the
+  // search field, a known tradeoff of this approach).
+
+  const DictionaryManager = {
+    _api:    null,
+    _query:  '',
+    _offset: 0,
+    _total:  0,
+    _words:  [],
+    _busy:   false,
+    _searchTimer: null,
+
+    open(editor) {
+      this._editor = editor;
+      this._query  = '';
+      this._offset = 0;
+      this._words  = [];
+      this._total  = 0;
+      this._busy   = true;
+      this._api = editor.windowManager.open(this._spec());
+      this._fetch(true);
+    },
+
+    _escape(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    },
+
+    _renderListHtml() {
+      if (this._busy && this._words.length === 0) {
+        return '<div style="padding:14px;color:#6b7280;direction:rtl;">טוען...</div>';
+      }
+      if (this._words.length === 0) {
+        return '<div style="padding:14px;color:#9ca3af;direction:rtl;">לא נמצאו מילים</div>';
+      }
+      const rows = this._words.map((w) => {
+        const safe = this._escape(w);
+        return (
+          `<div style="display:flex;justify-content:space-between;align-items:center;` +
+          `padding:5px 10px;border-bottom:1px solid #f3f4f6;direction:rtl;">` +
+          `<span>${safe}</span>` +
+          `<button type="button" class="mce-dict-remove" data-word="${safe}" ` +
+          `style="border:none;background:transparent;color:#dc2626;cursor:pointer;` +
+          `font-size:14px;padding:2px 6px;" title="הסר מהמילון">✕</button>` +
+          `</div>`
+        );
+      }).join('');
+      const header =
+        `<div style="padding:4px 10px;font-size:11px;color:#6b7280;direction:rtl;">` +
+        `מציג ${this._words.length} מתוך ${this._total}</div>`;
+      return `<div style="max-height:320px;overflow-y:auto;">${header}${rows}</div>`;
+    },
+
+    _spec() {
+      return {
+        title: 'ניהול מילון ארגוני',
+        size:  'medium',
+        body: {
+          type: 'panel',
+          items: [
+            { type: 'input', name: 'search', label: 'חיפוש', placeholder: 'הקלד לסינון...' },
+            { type: 'htmlpanel', html: this._renderListHtml() },
+          ],
+        },
+        initialData: { search: this._query },
+        buttons: [
+          { type: 'custom', name: 'loadMore', text: 'טען עוד', disabled: this._words.length >= this._total },
+          { type: 'cancel', text: 'סגור' },
+        ],
+        onChange: (api, details) => {
+          if (details.name !== 'search') return;
+          const val = api.getData().search;
+          clearTimeout(this._searchTimer);
+          this._searchTimer = setTimeout(() => {
+            this._query  = val;
+            this._offset = 0;
+            this._words  = [];
+            this._fetch(true);
+          }, DICT_SEARCH_DEBOUNCE_MS);
+        },
+        onAction: (_api, details) => {
+          if (details.name === 'loadMore') this._fetch(false);
+        },
+        onClose: () => {
+          clearTimeout(this._searchTimer);
+          this._api = null;
+        },
+      };
+    },
+
+    _redial() {
+      if (this._api) this._api.redial(this._spec());
+    },
+
+    async _fetch(reset) {
+      if (!this._api) return;
+      this._busy = true;
+      try {
+        const data = await Api.listDictionary({
+          q: this._query, limit: DICT_PAGE_SIZE, offset: this._offset,
+        });
+        this._words  = reset ? data.words : this._words.concat(data.words);
+        this._total  = data.count;
+        this._offset = this._words.length;
+      } catch (_err) {
+        Notifier.show('שגיאה בטעינת המילון', 'error');
+      } finally {
+        this._busy = false;
+        this._redial();
+      }
+    },
+
+    async removeWord(word) {
+      try {
+        const result = await Api.removeWord(word);
+        if (result.removed) {
+          this._words = this._words.filter((w) => w !== word);
+          this._total = Math.max(0, this._total - 1);
+          Notifier.show(`"${word}" הוסר מהמילון`, 'success');
+        } else {
+          Notifier.show(`"${word}" לא נמצא במילון`, 'info');
+        }
+      } catch (_err) {
+        Notifier.show('שגיאה בהסרת המילה', 'error');
+      }
+      this._redial();
+    },
+  };
+
+  // Delegated click handler for remove buttons — `htmlpanel` content lives in
+  // the main document (outside the editor iframe), so a single document-level
+  // listener handles every dialog instance.
+  document.addEventListener('mousedown', (e) => {
+    const btn = e.target.closest && e.target.closest('.mce-dict-remove');
+    if (!btn || !DictionaryManager._api) return;
+    e.preventDefault();
+    DictionaryManager.removeWord(btn.dataset.word);
+  });
+
   // ─── SVG icon definitions ──────────────────────────────────────────────────
   // Registered once per editor; referenced by name in button/toggleButton defs.
 
@@ -524,6 +702,12 @@ if (typeof AbortSignal.timeout !== 'function') {
     'hsc-auto':
       '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
       '<path fill="currentColor" d="M7 2v11h3v9l7-12h-4l4-8z"/>' +
+      '</svg>',
+
+    // Dictionary management: list/book lines
+    'hsc-dict':
+      '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">' +
+      '<path fill="currentColor" d="M4 5h16v2H4zm0 6h16v2H4zm0 6h10v2H4z"/>' +
       '</svg>',
   };
 
@@ -716,6 +900,15 @@ if (typeof AbortSignal.timeout !== 'function') {
       },
     });
 
+    editor.ui.registry.addButton('hebrewspellcheck_manage_dict', {
+      icon:    'hsc-dict',
+      tooltip: 'ניהול מילון ארגוני',
+      onAction: () => {
+        safeLog('click_manage_dict_button', {});
+        DictionaryManager.open(editor);
+      },
+    });
+
     // ── Keyboard shortcuts ──
     // Alt+S  — run spell-check
     // Alt+Shift+C — clear all highlights
@@ -732,6 +925,11 @@ if (typeof AbortSignal.timeout !== 'function') {
     editor.ui.registry.addMenuItem('hebrewspellcheck_clear', {
       text:    'נקה סימוני איות',
       onAction: clearAllHighlights,
+    });
+
+    editor.ui.registry.addMenuItem('hebrewspellcheck_manage_dict', {
+      text:    'ניהול מילון ארגוני',
+      onAction: () => DictionaryManager.open(editor),
     });
 
     // ── Context menu on right-click of a misspelled word ──

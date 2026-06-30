@@ -1,14 +1,16 @@
 """
 Organisational dictionary endpoints:
-  GET  /dictionary         — list all words in the organisational dictionary
-  POST /dictionary/suggest — forward a word + context to the external approval service
-  POST /dictionary/approve — callback used by the external approval service to add an
-                              approved word to the organisational dictionary
+  GET    /dictionary         — search/list words in the organisational dictionary (paginated)
+  DELETE /dictionary/{word}  — remove a word from the organisational dictionary
+  POST   /dictionary/suggest — forward a word + context to the external approval service
+  POST   /dictionary/approve — callback used by the external approval service to add an
+                                approved word to the organisational dictionary
 """
 import logging
+from typing import Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..config import settings
 from ..limiter import limiter
@@ -16,6 +18,7 @@ from ..models.schemas import (
     ApproveWordRequest,
     ApproveWordResponse,
     DictionaryResponse,
+    RemoveWordResponse,
     SuggestWordRequest,
     SuggestWordResponse,
 )
@@ -27,13 +30,33 @@ logger = logging.getLogger(__name__)
 @router.get(
     "",
     response_model=DictionaryResponse,
-    summary="List all words in the organisational dictionary",
+    summary="Search/list words in the organisational dictionary",
 )
 @limiter.limit("200/minute")
-async def list_words(request: Request) -> DictionaryResponse:
+async def list_words(
+    request: Request,
+    q: Optional[str] = Query(default=None, description="Case-insensitive substring filter."),
+    limit: int = Query(default=50, ge=1, le=200, description="Page size."),
+    offset: int = Query(default=0, ge=0, description="Number of matching words to skip."),
+) -> DictionaryResponse:
     dict_service = request.app.state.dict_service
-    words = dict_service.list_words()
-    return DictionaryResponse(words=words, count=len(words))
+    words, total = dict_service.search(q, limit, offset)
+    return DictionaryResponse(words=words, count=total, limit=limit, offset=offset)
+
+
+@router.delete(
+    "/{word}",
+    response_model=RemoveWordResponse,
+    summary="Remove a word from the organisational dictionary",
+)
+@limiter.limit("200/minute")
+async def remove_word(request: Request, word: str) -> RemoveWordResponse:
+    dict_service = request.app.state.dict_service
+    try:
+        removed = dict_service.remove(word)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return RemoveWordResponse(removed=removed)
 
 
 @router.post(

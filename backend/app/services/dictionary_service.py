@@ -172,5 +172,18 @@ class DictionaryService:
     def list_words(self) -> List[str]:
         return sorted(self._words, key=str.lower)
 
+    def search(
+        self, query: Optional[str] = None, limit: int = 50, offset: int = 0
+    ) -> tuple[List[str], int]:
+        """Case-insensitive substring search over the in-memory cache, paginated.
+
+        Returns (page_of_words, total_matching_words).
+        """
+        words = sorted(self._words, key=str.lower)
+        if query:
+            q = query.strip().lower()
+            words = [w for w in words if q in w.lower()]
+        return words[offset : offset + limit], len(words)
+
     def count(self) -> int:
         return len(self._words)
