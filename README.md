@@ -423,6 +423,23 @@ TinyMceSpellChecker/
 
 ## Running the Backend
 
+### Pre-built images
+
+Every push to `main` builds and publishes the backend and plugin images via
+the `build-images.yml` GitHub Action (also runnable manually from the
+Actions tab). Two ways to get them:
+
+- **Pull from GitHub Container Registry:**
+  ```bash
+  docker pull ghcr.io/barab2002/tinymcespellchecker-backend:latest
+  docker pull ghcr.io/barab2002/tinymcespellchecker-plugin:latest
+  ```
+  (requires `docker login ghcr.io` if the packages are private)
+- **Download as a file:** each workflow run also uploads `backend.tar` /
+  `plugin.tar` as run artifacts — open the run under the repo's **Actions**
+  tab and download them from the **Artifacts** section, then load locally
+  with `docker load -i backend.tar`. No registry login needed.
+
 ### Docker Compose (API + static demo server)
 
 ```bash
