@@ -23,6 +23,7 @@ services:
       - SPELLCHECK_DEFAULT_LANGUAGE=he_IL
       - SPELLCHECK_MAX_TEXT_LENGTH=200000
       - SPELLCHECK_MAX_SUGGESTIONS=5
+      - SPELLCHECK_APPROVEIT_URL=${APPROVEIT_URL:-}
     volumes:
       # Mounted so the legacy JSON can seed MongoDB on first startup
       - ./backend/dictionaries/custom:/app/dictionaries/custom

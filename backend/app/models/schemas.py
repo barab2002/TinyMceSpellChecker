@@ -176,15 +176,21 @@ class SpellCheckResponse(BaseModel):
     }
 
 
-# ─── Dictionary schemas ───────────────────────────────────────────────────────
+# ─── Suggest-to-dictionary schemas ─────────────────────────────────────────────
 
-class DictionaryWord(BaseModel):
+class SuggestWordRequest(BaseModel):
     word: str = Field(
         ...,
         min_length=1,
         max_length=200,
-        description="The word to add or remove from the organisational dictionary.",
+        description="The word being suggested for the organisational dictionary.",
         examples=["Salesforce", "ZoomInfo", "MyProduct"],
+    )
+    context: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Surrounding text where the word was found, for reviewer context.",
+        examples=["We use Salesforce for our CRM."],
     )
 
     @field_validator("word")
@@ -197,37 +203,17 @@ class DictionaryWord(BaseModel):
 
     model_config = {
         "json_schema_extra": {
-            "example": {"word": "Salesforce"}
+            "example": {"word": "Salesforce", "context": "We use Salesforce for our CRM."}
         }
     }
 
 
-class DictionaryResponse(BaseModel):
-    words: List[str] = Field(
-        ...,
-        description="All words currently in the organisational dictionary, sorted alphabetically.",
-    )
-    count: int = Field(..., description="Total number of words in the dictionary.", ge=0)
+class SuggestWordResponse(BaseModel):
+    status: str = Field(..., description="Result of forwarding the suggestion to the approval service.")
 
     model_config = {
         "json_schema_extra": {
-            "example": {
-                "words": ["Base44", "Clari", "HubSpot", "Salesforce", "ZoomInfo"],
-                "count": 5,
-            }
-        }
-    }
-
-
-class DictionaryImportResponse(BaseModel):
-    added: int = Field(..., description="Number of new words added.", ge=0)
-    skipped: int = Field(..., description="Words already present (no-ops).", ge=0)
-    errors: List[dict] = Field(default_factory=list, description="Words that failed validation.")
-    total_words: int = Field(..., description="Total words in dictionary after import.", ge=0)
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {"added": 12, "skipped": 3, "errors": [], "total_words": 25}
+            "example": {"status": "ok"}
         }
     }
 

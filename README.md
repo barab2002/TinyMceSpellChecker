@@ -329,7 +329,7 @@ export function HebrewEditor() {
 |---|---|---|
 | Clicking "בדיקת איות" shows error toast | Backend not reachable from browser | Check `hebrewspellcheck_api_url` and that the API is running |
 | Misspelled words not highlighted | `extended_valid_elements` missing | Add `extended_valid_elements: 'span[class|data-word|data-suggestions]'` |
-| Org product names flagged as errors | Not in custom dictionary | Add via `POST /dictionary/add` or the "הוסף למילון" button in the editor |
+| Org product names flagged as errors | Not in custom dictionary | Suggest it via the "הצע למילון" button, or add it directly to `org_dictionary.json` |
 | CORS error in browser console | Backend rejecting your app's origin | See [CORS Configuration](#cors-configuration) below |
 | `option 'hebrewspellcheck_api_url' not registered` in console | Old TinyMCE version | Requires TinyMCE **v7** — check `tinymce.majorVersion` |
 | Plugin not loading at all | Wrong file path | Verify `plugin.js` is served at the URL you pass to `external_plugins` |
@@ -356,8 +356,8 @@ export function HebrewEditor() {
 ┌──────────────────────────────────────────────────────────┐
 │  FastAPI  (backend/app/main.py)                          │
 │                                                          │
-│  POST /spell/check  ──► SpellService (spylls + he_IL)   │
-│  GET|POST /dictionary ► DictionaryService (JSON file)   │
+│  POST /spell/check     ──► SpellService (spylls + he_IL) │
+│  POST /dictionary/suggest ► forwards to APPROVEIT_URL    │
 │  GET /health                                             │
 │                                                          │
 │  he_IL.aff + he_IL.dic (bundled) + org_dictionary.json  │
@@ -396,7 +396,7 @@ TinyMceSpellChecker/
 │   │   │   └── dictionary_service.py ← JSON-backed custom word list
 │   │   └── routes/
 │   │       ├── spell.py         ← POST /spell/check
-│   │       └── dictionary.py    ← GET/POST /dictionary/*
+│   │       └── dictionary.py    ← POST /dictionary/suggest
 │   ├── dictionaries/
 │   │   ├── he_IL.aff            ← Bundled Hebrew Hunspell affix rules
 │   │   ├── he_IL.dic            ← Bundled Hebrew word list (469k words)
@@ -487,7 +487,7 @@ Pass these in your `tinymce.init()` call alongside the plugin registration.
 |---|---|
 | `• suggestion` | Replaces the word with that suggestion |
 | התעלם | Removes the highlight, keeps the original word |
-| הוסף למילון | Calls `POST /dictionary/add`, word accepted forever |
+| הצע למילון | Calls `POST /dictionary/suggest`, forwards `{word, context}` to the external `APPROVEIT_URL` service for review |
 
 ---
 
@@ -552,41 +552,24 @@ these to find and highlight the exact text node in the editor.
 
 ---
 
-### `GET /dictionary`
+### `POST /dictionary/suggest`
 
-List all organisational dictionary words.
+Forward a word (and optional surrounding context) to the external approval
+service configured via `APPROVEIT_URL`. The plugin calls this when the user
+clicks **"הצע למילון"** on a misspelled word.
 
 ```bash
-curl http://localhost:8000/dictionary
+curl -X POST http://localhost:8000/dictionary/suggest \
+  -H "Content-Type: application/json" \
+  -d '{"word": "MyProduct", "context": "We use MyProduct for our CRM."}'
 ```
 
 ```json
-{ "words": ["Base44", "Clari", "Salesforce", "ZoomInfo"], "count": 4 }
+{ "status": "ok" }
 ```
 
----
-
-### `POST /dictionary/add`
-
-Add a word to the custom dictionary. Idempotent.
-
-```bash
-curl -X POST http://localhost:8000/dictionary/add \
-  -H "Content-Type: application/json" \
-  -d '{"word": "MyProduct"}'
-```
-
----
-
-### `POST /dictionary/remove`
-
-Remove a word. Returns 404 if not found.
-
-```bash
-curl -X POST http://localhost:8000/dictionary/remove \
-  -H "Content-Type: application/json" \
-  -d '{"word": "MyProduct"}'
-```
+Returns `500` if `APPROVEIT_URL` is not configured, or `502` if the approval
+service is unreachable or returns an error.
 
 ---
 
@@ -598,20 +581,15 @@ It is **pre-seeded** with common SaaS tool names (Salesforce, ZoomInfo, Snowflak
 Words you add here are **always accepted** — they take priority over Hunspell.
 Use it for: product names, customer names, internal acronyms, technical terms.
 
-### Add words in bulk via shell
-
-```bash
-for word in "ProductA" "TeamName" "AcronymXYZ" "ClientCo"; do
-  curl -s -X POST http://localhost:8000/dictionary/add \
-    -H "Content-Type: application/json" \
-    -d "{\"word\": \"$word\"}"
-done
-```
+Words are no longer added through the API. Users suggest new words via the
+**"הצע למילון"** button, which forwards the suggestion to your external
+approval service (see `POST /dictionary/suggest` above). Once a suggestion is
+approved by your review process, add it to the dictionary file directly.
 
 ### Edit the file directly
 
-You can also edit `org_dictionary.json` directly (format below) — changes are
-picked up on the next API restart:
+Edit `org_dictionary.json` directly (format below) — changes are picked up on
+the next API restart:
 
 ```json
 {
@@ -674,6 +652,7 @@ All backend settings use the `SPELLCHECK_` prefix.
 | `SPELLCHECK_MAX_TEXT_LENGTH` | `200000` | Maximum characters accepted per request |
 | `SPELLCHECK_MAX_SUGGESTIONS` | `5` | Default max suggestions per word |
 | `SPELLCHECK_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `SPELLCHECK_APPROVEIT_URL` | _(empty)_ | External service URL that receives `{word, context}` from `POST /dictionary/suggest` |
 
 Copy `.env.example` to `.env` and edit as needed before starting with Docker.
 
@@ -713,10 +692,10 @@ Set `SPELLCHECK_LOG_LEVEL=DEBUG` for verbose output during development.
 4. **Mixed Hebrew-English tokens**: `מנהל-CRM` is tokenised as `מנהל` (checked)
    + `CRM` (skipped as non-Hebrew).
 
-5. **Concurrent dictionary writes**: The JSON dictionary file has no file lock.
-   Multiple simultaneous `POST /dictionary/add` requests could race. In
-   practice, dictionary writes are rare. For high-concurrency environments,
-   switch `DictionaryService` to SQLite.
+5. **Dictionary file is edited out-of-band**: Since words are no longer added
+   through the API, there's no write-concurrency concern — `org_dictionary.json`
+   is only read at startup and edited manually (or by your own tooling) between
+   restarts.
 
 6. **TinyMCE Hebrew UI language pack**: Not bundled. Download separately from
    the TinyMCE website if you want the editor's own UI (menus, dialogs) in Hebrew.
@@ -741,10 +720,12 @@ Set `SPELLCHECK_LOG_LEVEL=DEBUG` for verbose output during development.
 2. Add the language tag to the validator whitelist in `backend/app/models/schemas.py`.
 3. Pass `hebrewspellcheck_language: 'en-US'` in your `tinymce.init()`.
 
-### Dictionary management UI
+### Approval service integration
 
-Build a simple admin page that calls `GET /dictionary`, `POST /dictionary/add`,
-and `POST /dictionary/remove` — no backend changes needed.
+`POST /dictionary/suggest` only forwards suggestions — it doesn't know whether
+they were approved. A future improvement could add a webhook/callback from the
+approval service back into the API to automatically append approved words to
+`org_dictionary.json`.
 
 ### Suggestions quality
 

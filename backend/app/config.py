@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     # --- Logging ---
     log_level: str = "INFO"
 
+    # --- External approval service ---
+    # URL that receives {word, context} when a user clicks "הצע למילון"
+    approveit_url: str = ""
+
     @property
     def cors_origins_list(self) -> List[str]:
         if self.cors_origins.strip() == "*":
