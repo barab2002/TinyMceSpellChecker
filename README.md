@@ -329,7 +329,7 @@ export function HebrewEditor() {
 |---|---|---|
 | Clicking "בדיקת איות" shows error toast | Backend not reachable from browser | Check `hebrewspellcheck_api_url` and that the API is running |
 | Misspelled words not highlighted | `extended_valid_elements` missing | Add `extended_valid_elements: 'span[class|data-word|data-suggestions]'` |
-| Org product names flagged as errors | Not in custom dictionary | Add via `POST /dictionary/add` or the "הוסף למילון" button in the editor |
+| Org product names flagged as errors | Not in custom dictionary | Suggest it via the "הצע למילון" button and have it approved, or call `POST /dictionary/approve` directly |
 | CORS error in browser console | Backend rejecting your app's origin | See [CORS Configuration](#cors-configuration) below |
 | `option 'hebrewspellcheck_api_url' not registered` in console | Old TinyMCE version | Requires TinyMCE **v7** — check `tinymce.majorVersion` |
 | Plugin not loading at all | Wrong file path | Verify `plugin.js` is served at the URL you pass to `external_plugins` |
@@ -356,11 +356,14 @@ export function HebrewEditor() {
 ┌──────────────────────────────────────────────────────────┐
 │  FastAPI  (backend/app/main.py)                          │
 │                                                          │
-│  POST /spell/check  ──► SpellService (spylls + he_IL)   │
-│  GET|POST /dictionary ► DictionaryService (JSON file)   │
+│  POST /spell/check     ──► SpellService (spylls + he_IL) │
+│  GET  /dictionary      ──► list all custom dictionary words │
+│  POST /dictionary/suggest ► forwards to APPROVEIT_URL    │
+│  POST /dictionary/approve ◄ callback from APPROVEIT_URL  │
 │  GET /health                                             │
 │                                                          │
-│  he_IL.aff + he_IL.dic (bundled) + org_dictionary.json  │
+│  he_IL.aff + he_IL.dic (bundled) + custom dictionary    │
+│  (MongoDB)                                               │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -393,15 +396,15 @@ TinyMceSpellChecker/
 │   │   ├── models/schemas.py    ← Pydantic request/response schemas
 │   │   ├── services/
 │   │   │   ├── spell_service.py     ← spylls wrapper + Hebrew tokeniser
-│   │   │   └── dictionary_service.py ← JSON-backed custom word list
+│   │   │   └── dictionary_service.py ← MongoDB-backed custom word list
 │   │   └── routes/
 │   │       ├── spell.py         ← POST /spell/check
-│   │       └── dictionary.py    ← GET/POST /dictionary/*
+│   │       └── dictionary.py    ← GET /dictionary, POST /dictionary/suggest, POST /dictionary/approve
 │   ├── dictionaries/
 │   │   ├── he_IL.aff            ← Bundled Hebrew Hunspell affix rules
 │   │   ├── he_IL.dic            ← Bundled Hebrew word list (469k words)
 │   │   └── custom/
-│   │       └── org_dictionary.json  ← Your organisation's custom words
+│   │       └── org_dictionary.json  ← One-time seed for MongoDB (empty-DB only)
 │   ├── requirements.txt
 │   └── Dockerfile
 │
@@ -487,7 +490,7 @@ Pass these in your `tinymce.init()` call alongside the plugin registration.
 |---|---|
 | `• suggestion` | Replaces the word with that suggestion |
 | התעלם | Removes the highlight, keeps the original word |
-| הוסף למילון | Calls `POST /dictionary/add`, word accepted forever |
+| הצע למילון | Calls `POST /dictionary/suggest`, forwards `{word, context}` to the external `APPROVEIT_URL` service for review |
 
 ---
 
@@ -554,70 +557,93 @@ these to find and highlight the exact text node in the editor.
 
 ### `GET /dictionary`
 
-List all organisational dictionary words.
+List every word currently in the organisational dictionary.
 
 ```bash
 curl http://localhost:8000/dictionary
 ```
 
 ```json
-{ "words": ["Base44", "Clari", "Salesforce", "ZoomInfo"], "count": 4 }
+{ "words": ["Base44", "Clari", "HubSpot", "Salesforce", "ZoomInfo"], "count": 5 }
 ```
+
+This endpoint has **no authentication** — only expose it on a trusted network.
 
 ---
 
-### `POST /dictionary/add`
+### `POST /dictionary/suggest`
 
-Add a word to the custom dictionary. Idempotent.
+Forward a word (and optional surrounding context) to the external approval
+service configured via `APPROVEIT_URL`. The plugin calls this when the user
+clicks **"הצע למילון"** on a misspelled word. `context` is built client-side
+from the 5 words before and the 5 words after the misspelled word in its
+enclosing block (paragraph, list item, table cell, etc.).
 
 ```bash
-curl -X POST http://localhost:8000/dictionary/add \
+curl -X POST http://localhost:8000/dictionary/suggest \
+  -H "Content-Type: application/json" \
+  -d '{"word": "MyProduct", "context": "We use MyProduct for our CRM."}'
+```
+
+```json
+{ "status": "ok" }
+```
+
+Returns `500` if `APPROVEIT_URL` is not configured, or `502` if the approval
+service is unreachable or returns an error.
+
+---
+
+### `POST /dictionary/approve`
+
+Callback for your external approval service. Call this once a reviewer
+approves a word suggested via `/dictionary/suggest`, and it's added to the
+organisational dictionary immediately — every worker picks it up on its next
+refresh cycle (`SPELLCHECK_DICT_REFRESH_INTERVAL_MINUTES`).
+
+```bash
+curl -X POST http://localhost:8000/dictionary/approve \
   -H "Content-Type: application/json" \
   -d '{"word": "MyProduct"}'
 ```
 
----
-
-### `POST /dictionary/remove`
-
-Remove a word. Returns 404 if not found.
-
-```bash
-curl -X POST http://localhost:8000/dictionary/remove \
-  -H "Content-Type: application/json" \
-  -d '{"word": "MyProduct"}'
+```json
+{ "added": true }
 ```
+
+`added` is `false` if the word was already present. Returns `400` for an
+invalid word, `503` if MongoDB is unavailable.
+
+This endpoint has **no authentication** — only expose it on a network your
+approval service can reach but the public internet cannot.
 
 ---
 
 ## Custom / Organisational Dictionary
 
-The dictionary file is at `backend/dictionaries/custom/org_dictionary.json`.
-It is **pre-seeded** with common SaaS tool names (Salesforce, ZoomInfo, Snowflake, etc.).
+Custom words are stored in **MongoDB** (`DictionaryService`,
+`backend/app/services/dictionary_service.py`), with an in-memory cache per
+worker that refreshes on `SPELLCHECK_DICT_REFRESH_INTERVAL_MINUTES`.
+`backend/dictionaries/custom/org_dictionary.json` is only used as a **one-time
+seed** the first time the database is empty.
+
+By default, Docker Compose points the API at the bundled `mongo` container
+(`mongodb://mongo:27017`). To use an external MongoDB instance (e.g. Atlas or
+a shared cluster) instead, set `MONGO_URI` (and optionally `MONGO_DB` /
+`MONGO_COLLECTION`) in the root `.env` — see [Environment
+Variables](#environment-variables). The bundled `mongo` service can then be
+removed from `docker-compose.yml` if you don't need it. Running the backend
+directly (not via Docker Compose) uses the equivalent `SPELLCHECK_MONGO_URI`
+/ `SPELLCHECK_MONGO_DB` / `SPELLCHECK_MONGO_COLLECTION` settings in
+`backend/.env` instead.
 
 Words you add here are **always accepted** — they take priority over Hunspell.
 Use it for: product names, customer names, internal acronyms, technical terms.
 
-### Add words in bulk via shell
-
-```bash
-for word in "ProductA" "TeamName" "AcronymXYZ" "ClientCo"; do
-  curl -s -X POST http://localhost:8000/dictionary/add \
-    -H "Content-Type: application/json" \
-    -d "{\"word\": \"$word\"}"
-done
-```
-
-### Edit the file directly
-
-You can also edit `org_dictionary.json` directly (format below) — changes are
-picked up on the next API restart:
-
-```json
-{
-  "words": ["Salesforce", "ZoomInfo", "MyProduct", "TeamAcronym"]
-}
-```
+Words are added automatically by the approval loop: a user suggests a word via
+the **"הצע למילון"** button (`POST /dictionary/suggest`, forwarded to your
+external `APPROVEIT_URL` service), and once a reviewer approves it there, your
+approval service calls `POST /dictionary/approve` back into the API to add it.
 
 ---
 
@@ -661,6 +687,25 @@ Fix: add `http://your-app.com` to `CORS_ORIGINS`.
 
 ## Environment Variables
 
+### Docker Compose (root `.env`)
+
+These are read by `docker-compose.yml` and mapped to the `SPELLCHECK_*`
+backend settings below — copy `.env.example` to `.env` and edit as needed.
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_PORT` | `8000` | Host port the API is published on |
+| `STATIC_PORT` | `3000` | Host port for the static file server (plugin + example page) |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated or `*`) |
+| `DICT_REFRESH_INTERVAL_MINUTES` | `5` | How often each worker reloads the dictionary cache from MongoDB (`0` disables) |
+| `MONGO_URI` | `mongodb://mongo:27017` | MongoDB connection string. Set to an external instance (e.g. Atlas) to bypass the bundled `mongo` container |
+| `MONGO_DB` | `spellcheck` | MongoDB database name |
+| `MONGO_COLLECTION` | `custom_dictionary` | MongoDB collection the custom dictionary is stored in |
+| `APPROVEIT_URL` | _(empty)_ | External service URL that receives `{word, context}` from `POST /dictionary/suggest` |
+
+### Backend (`backend/.env`, or set directly when running without Docker)
+
 All backend settings use the `SPELLCHECK_` prefix.
 
 | Variable | Default | Description |
@@ -669,11 +714,16 @@ All backend settings use the `SPELLCHECK_` prefix.
 | `SPELLCHECK_PORT` | `8000` | API port |
 | `SPELLCHECK_CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated or `*`) |
 | `SPELLCHECK_HUNSPELL_DICT_DIR` | `/app/dictionaries` | Path to the directory with `he_IL.aff` / `he_IL.dic` |
-| `SPELLCHECK_CUSTOM_DICT_PATH` | `/app/dictionaries/custom/org_dictionary.json` | Path to the custom org dictionary file |
+| `SPELLCHECK_CUSTOM_DICT_PATH` | `/app/dictionaries/custom/org_dictionary.json` | One-time seed file, loaded into MongoDB only if the collection is empty |
+| `SPELLCHECK_MONGO_URI` | `mongodb://mongo:27017` | MongoDB connection string for the custom dictionary store |
+| `SPELLCHECK_MONGO_DB` | `spellcheck` | MongoDB database name |
+| `SPELLCHECK_MONGO_COLLECTION` | `custom_dictionary` | MongoDB collection name |
+| `SPELLCHECK_DICT_REFRESH_INTERVAL_MINUTES` | `5` | How often each worker reloads the dictionary cache from MongoDB (`0` disables) |
 | `SPELLCHECK_DEFAULT_LANGUAGE` | `he_IL` | Spell-check language (must match a `.aff`/`.dic` pair) |
 | `SPELLCHECK_MAX_TEXT_LENGTH` | `200000` | Maximum characters accepted per request |
 | `SPELLCHECK_MAX_SUGGESTIONS` | `5` | Default max suggestions per word |
 | `SPELLCHECK_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `SPELLCHECK_APPROVEIT_URL` | _(empty)_ | External service URL that receives `{word, context}` from `POST /dictionary/suggest` |
 
 Copy `.env.example` to `.env` and edit as needed before starting with Docker.
 
@@ -713,10 +763,9 @@ Set `SPELLCHECK_LOG_LEVEL=DEBUG` for verbose output during development.
 4. **Mixed Hebrew-English tokens**: `מנהל-CRM` is tokenised as `מנהל` (checked)
    + `CRM` (skipped as non-Hebrew).
 
-5. **Concurrent dictionary writes**: The JSON dictionary file has no file lock.
-   Multiple simultaneous `POST /dictionary/add` requests could race. In
-   practice, dictionary writes are rare. For high-concurrency environments,
-   switch `DictionaryService` to SQLite.
+5. **`/dictionary/approve` has no authentication**: Anyone who can reach the
+   endpoint can add words. Only expose it on a network your approval service
+   can reach but the public internet cannot.
 
 6. **TinyMCE Hebrew UI language pack**: Not bundled. Download separately from
    the TinyMCE website if you want the editor's own UI (menus, dialogs) in Hebrew.
@@ -727,8 +776,8 @@ Set `SPELLCHECK_LOG_LEVEL=DEBUG` for verbose output during development.
 
 ### Production hardening
 
-- **Move dictionary to SQLite/PostgreSQL** — `DictionaryService` is fully isolated;
-  swap the implementation without touching routes or the plugin.
+- **Authenticate `/dictionary/approve`** — add a shared-secret header check so
+  only your approval service can call it.
 - **API key authentication** — add a header check so only authorised apps can
   call the spell-check service on your intranet.
 - **HTTPS** — terminate TLS at your Nginx/load balancer in front of the API.
@@ -740,11 +789,6 @@ Set `SPELLCHECK_LOG_LEVEL=DEBUG` for verbose output during development.
    For English: `apt-get install hunspell-en-us` then copy `en_US.*`.
 2. Add the language tag to the validator whitelist in `backend/app/models/schemas.py`.
 3. Pass `hebrewspellcheck_language: 'en-US'` in your `tinymce.init()`.
-
-### Dictionary management UI
-
-Build a simple admin page that calls `GET /dictionary`, `POST /dictionary/add`,
-and `POST /dictionary/remove` — no backend changes needed.
 
 ### Suggestions quality
 

@@ -115,7 +115,7 @@ curl -s -X POST http://localhost:8000/spell/check \\
 ```js
 tinymce.init({
   external_plugins: { hebrewspellcheck: '/plugin/hebrewspellcheck/plugin.js' },
-  toolbar: 'hebrewspellcheck hebrewspellcheck_clear hebrewspellcheck_toggle_auto hebrewspellcheck_dictionary | bold italic',
+  toolbar: 'hebrewspellcheck hebrewspellcheck_clear hebrewspellcheck_toggle_auto | bold italic',
   hebrewspellcheck_api_url: 'http://localhost:8000',
   extended_valid_elements: 'span[class|data-word|data-suggestions]',
   browser_spellcheck: false,
@@ -136,8 +136,9 @@ tinymce.init({
             {
                 "name": "Dictionary",
                 "description": (
-                    "Manage the organisational word list. "
-                    "Words added here are always accepted — even if Hunspell flags them."
+                    "Forward user-suggested words to the external approval service. "
+                    "The organisational word list (always accepted, even if Hunspell flags "
+                    "them) is managed out-of-band."
                 ),
             },
             {

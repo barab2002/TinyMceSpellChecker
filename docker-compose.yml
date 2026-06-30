@@ -16,13 +16,14 @@ services:
       - SPELLCHECK_CORS_ORIGINS=${CORS_ORIGINS:-*}
       - SPELLCHECK_HUNSPELL_DICT_DIR=/app/dictionaries
       - SPELLCHECK_CUSTOM_DICT_PATH=/app/dictionaries/custom/org_dictionary.json
-      - SPELLCHECK_MONGO_URI=mongodb://mongo:27017
-      - SPELLCHECK_MONGO_DB=spellcheck
-      - SPELLCHECK_MONGO_COLLECTION=custom_dictionary
+      - SPELLCHECK_MONGO_URI=${MONGO_URI:-mongodb://mongo:27017}
+      - SPELLCHECK_MONGO_DB=${MONGO_DB:-spellcheck}
+      - SPELLCHECK_MONGO_COLLECTION=${MONGO_COLLECTION:-custom_dictionary}
       - SPELLCHECK_DICT_REFRESH_INTERVAL_MINUTES=${DICT_REFRESH_INTERVAL_MINUTES:-5}
       - SPELLCHECK_DEFAULT_LANGUAGE=he_IL
       - SPELLCHECK_MAX_TEXT_LENGTH=200000
       - SPELLCHECK_MAX_SUGGESTIONS=5
+      - SPELLCHECK_APPROVEIT_URL=${APPROVEIT_URL:-}
     volumes:
       # Mounted so the legacy JSON can seed MongoDB on first startup
       - ./backend/dictionaries/custom:/app/dictionaries/custom

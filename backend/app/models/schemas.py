@@ -176,15 +176,21 @@ class SpellCheckResponse(BaseModel):
     }
 
 
-# ─── Dictionary schemas ───────────────────────────────────────────────────────
+# ─── Suggest-to-dictionary schemas ─────────────────────────────────────────────
 
-class DictionaryWord(BaseModel):
+class SuggestWordRequest(BaseModel):
     word: str = Field(
         ...,
         min_length=1,
         max_length=200,
-        description="The word to add or remove from the organisational dictionary.",
+        description="The word being suggested for the organisational dictionary.",
         examples=["Salesforce", "ZoomInfo", "MyProduct"],
+    )
+    context: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Surrounding text where the word was found, for reviewer context.",
+        examples=["We use Salesforce for our CRM."],
     )
 
     @field_validator("word")
@@ -197,10 +203,22 @@ class DictionaryWord(BaseModel):
 
     model_config = {
         "json_schema_extra": {
-            "example": {"word": "Salesforce"}
+            "example": {"word": "Salesforce", "context": "We use Salesforce for our CRM."}
         }
     }
 
+
+class SuggestWordResponse(BaseModel):
+    status: str = Field(..., description="Result of forwarding the suggestion to the approval service.")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"status": "ok"}
+        }
+    }
+
+
+# ─── List-dictionary schema ────────────────────────────────────────────────────
 
 class DictionaryResponse(BaseModel):
     words: List[str] = Field(
@@ -219,15 +237,38 @@ class DictionaryResponse(BaseModel):
     }
 
 
-class DictionaryImportResponse(BaseModel):
-    added: int = Field(..., description="Number of new words added.", ge=0)
-    skipped: int = Field(..., description="Words already present (no-ops).", ge=0)
-    errors: List[dict] = Field(default_factory=list, description="Words that failed validation.")
-    total_words: int = Field(..., description="Total words in dictionary after import.", ge=0)
+# ─── Approve-word callback schemas ─────────────────────────────────────────────
+
+class ApproveWordRequest(BaseModel):
+    word: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="The word approved for the organisational dictionary.",
+        examples=["Salesforce", "ZoomInfo", "MyProduct"],
+    )
+
+    @field_validator("word")
+    @classmethod
+    def no_control_chars(cls, v: str) -> str:
+        v = v.strip()
+        if re.search(r"[\x00-\x1f\x7f]", v):
+            raise ValueError("Word contains invalid control characters")
+        return v
 
     model_config = {
         "json_schema_extra": {
-            "example": {"added": 12, "skipped": 3, "errors": [], "total_words": 25}
+            "example": {"word": "Salesforce"}
+        }
+    }
+
+
+class ApproveWordResponse(BaseModel):
+    added: bool = Field(..., description="True if the word was newly added, False if it was already present.")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"added": True}
         }
     }
 
