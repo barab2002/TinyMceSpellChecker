@@ -627,6 +627,16 @@ worker that refreshes on `SPELLCHECK_DICT_REFRESH_INTERVAL_MINUTES`.
 `backend/dictionaries/custom/org_dictionary.json` is only used as a **one-time
 seed** the first time the database is empty.
 
+By default, Docker Compose points the API at the bundled `mongo` container
+(`mongodb://mongo:27017`). To use an external MongoDB instance (e.g. Atlas or
+a shared cluster) instead, set `MONGO_URI` (and optionally `MONGO_DB` /
+`MONGO_COLLECTION`) in the root `.env` — see [Environment
+Variables](#environment-variables). The bundled `mongo` service can then be
+removed from `docker-compose.yml` if you don't need it. Running the backend
+directly (not via Docker Compose) uses the equivalent `SPELLCHECK_MONGO_URI`
+/ `SPELLCHECK_MONGO_DB` / `SPELLCHECK_MONGO_COLLECTION` settings in
+`backend/.env` instead.
+
 Words you add here are **always accepted** — they take priority over Hunspell.
 Use it for: product names, customer names, internal acronyms, technical terms.
 
@@ -676,6 +686,25 @@ Fix: add `http://your-app.com` to `CORS_ORIGINS`.
 ---
 
 ## Environment Variables
+
+### Docker Compose (root `.env`)
+
+These are read by `docker-compose.yml` and mapped to the `SPELLCHECK_*`
+backend settings below — copy `.env.example` to `.env` and edit as needed.
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_PORT` | `8000` | Host port the API is published on |
+| `STATIC_PORT` | `3000` | Host port for the static file server (plugin + example page) |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `CORS_ORIGINS` | `*` | Allowed CORS origins (comma-separated or `*`) |
+| `DICT_REFRESH_INTERVAL_MINUTES` | `5` | How often each worker reloads the dictionary cache from MongoDB (`0` disables) |
+| `MONGO_URI` | `mongodb://mongo:27017` | MongoDB connection string. Set to an external instance (e.g. Atlas) to bypass the bundled `mongo` container |
+| `MONGO_DB` | `spellcheck` | MongoDB database name |
+| `MONGO_COLLECTION` | `custom_dictionary` | MongoDB collection the custom dictionary is stored in |
+| `APPROVEIT_URL` | _(empty)_ | External service URL that receives `{word, context}` from `POST /dictionary/suggest` |
+
+### Backend (`backend/.env`, or set directly when running without Docker)
 
 All backend settings use the `SPELLCHECK_` prefix.
 
