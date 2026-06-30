@@ -66,10 +66,10 @@ echo "5. GET /dictionary — list custom words"
 curl -s "$BASE_URL/dictionary" | jq . 2>/dev/null
 echo ""
 
-# ── 6. Add a word to the dictionary ───────────────────────────────────────────
+# ── 6. Approve a word into the dictionary ──────────────────────────────────────
 echo "$DIVIDER"
-echo "6. POST /dictionary/add — add 'TestWord'"
-curl -s -X POST "$BASE_URL/dictionary/add" \
+echo "6. POST /dictionary/approve — add 'TestWord'"
+curl -s -X POST "$BASE_URL/dictionary/approve" \
   -H "Content-Type: application/json" \
   -d '{"word": "TestWord"}' | jq . 2>/dev/null
 echo ""
@@ -83,14 +83,6 @@ curl -s -X POST "$BASE_URL/spell/check" \
     "text": "השתמשנו ב-TestWord לצורך הבדיקה.",
     "language": "he-IL"
   }' | jq . 2>/dev/null
-echo ""
-
-# ── 8. Remove the test word ────────────────────────────────────────────────────
-echo "$DIVIDER"
-echo "8. POST /dictionary/remove — remove 'TestWord'"
-curl -s -X POST "$BASE_URL/dictionary/remove" \
-  -H "Content-Type: application/json" \
-  -d '{"word": "TestWord"}' | jq . 2>/dev/null
 echo ""
 
 echo "$DIVIDER"

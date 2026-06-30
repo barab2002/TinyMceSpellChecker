@@ -1,5 +1,6 @@
 """
 Organisational dictionary endpoints:
+  GET  /dictionary         — list all words in the organisational dictionary
   POST /dictionary/suggest — forward a word + context to the external approval service
   POST /dictionary/approve — callback used by the external approval service to add an
                               approved word to the organisational dictionary
@@ -14,12 +15,25 @@ from ..limiter import limiter
 from ..models.schemas import (
     ApproveWordRequest,
     ApproveWordResponse,
+    DictionaryResponse,
     SuggestWordRequest,
     SuggestWordResponse,
 )
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+@router.get(
+    "",
+    response_model=DictionaryResponse,
+    summary="List all words in the organisational dictionary",
+)
+@limiter.limit("200/minute")
+async def list_words(request: Request) -> DictionaryResponse:
+    dict_service = request.app.state.dict_service
+    words = dict_service.list_words()
+    return DictionaryResponse(words=words, count=len(words))
 
 
 @router.post(

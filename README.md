@@ -357,6 +357,7 @@ export function HebrewEditor() {
 │  FastAPI  (backend/app/main.py)                          │
 │                                                          │
 │  POST /spell/check     ──► SpellService (spylls + he_IL) │
+│  GET  /dictionary      ──► list all custom dictionary words │
 │  POST /dictionary/suggest ► forwards to APPROVEIT_URL    │
 │  POST /dictionary/approve ◄ callback from APPROVEIT_URL  │
 │  GET /health                                             │
@@ -398,7 +399,7 @@ TinyMceSpellChecker/
 │   │   │   └── dictionary_service.py ← MongoDB-backed custom word list
 │   │   └── routes/
 │   │       ├── spell.py         ← POST /spell/check
-│   │       └── dictionary.py    ← POST /dictionary/suggest, POST /dictionary/approve
+│   │       └── dictionary.py    ← GET /dictionary, POST /dictionary/suggest, POST /dictionary/approve
 │   ├── dictionaries/
 │   │   ├── he_IL.aff            ← Bundled Hebrew Hunspell affix rules
 │   │   ├── he_IL.dic            ← Bundled Hebrew word list (469k words)
@@ -551,6 +552,22 @@ curl -X POST http://localhost:8000/spell/check \
 
 `start` / `end` are **character offsets** in the text you sent. The plugin uses
 these to find and highlight the exact text node in the editor.
+
+---
+
+### `GET /dictionary`
+
+List every word currently in the organisational dictionary.
+
+```bash
+curl http://localhost:8000/dictionary
+```
+
+```json
+{ "words": ["Base44", "Clari", "HubSpot", "Salesforce", "ZoomInfo"], "count": 5 }
+```
+
+This endpoint has **no authentication** — only expose it on a trusted network.
 
 ---
 

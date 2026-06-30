@@ -218,6 +218,25 @@ class SuggestWordResponse(BaseModel):
     }
 
 
+# ─── List-dictionary schema ────────────────────────────────────────────────────
+
+class DictionaryResponse(BaseModel):
+    words: List[str] = Field(
+        ...,
+        description="All words currently in the organisational dictionary, sorted alphabetically.",
+    )
+    count: int = Field(..., description="Total number of words in the dictionary.", ge=0)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "words": ["Base44", "Clari", "HubSpot", "Salesforce", "ZoomInfo"],
+                "count": 5,
+            }
+        }
+    }
+
+
 # ─── Approve-word callback schemas ─────────────────────────────────────────────
 
 class ApproveWordRequest(BaseModel):
