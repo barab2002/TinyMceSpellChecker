@@ -18,7 +18,16 @@ class Settings(BaseSettings):
 
     # --- Paths ---
     hunspell_dict_dir: str = "/app/dictionaries"
+    # Reused as the one-time seed source when migrating into MongoDB.
     custom_dict_path: str = "/app/dictionaries/custom/org_dictionary.json"
+
+    # --- MongoDB (custom dictionary store) ---
+    mongo_uri: str = "mongodb://mongo:27017"
+    mongo_db: str = "spellcheck"
+    mongo_collection: str = "custom_dictionary"
+    # How often each worker reloads the dictionary cache from Mongo.
+    # Set to 0 to disable the periodic refresh.
+    dict_refresh_interval_minutes: float = 5.0
 
     # --- Spell check defaults ---
     default_language: str = "he_IL"
