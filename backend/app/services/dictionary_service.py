@@ -32,6 +32,16 @@ logger = logging.getLogger(__name__)
 # Words are stored in their original case but matched case-insensitively
 _VALID_WORD_RE = re.compile(r"^[\w֐-׿יִ-פֿ .'\-]+$", re.UNICODE)
 
+# Normalize keyboard ASCII quotes to their Hebrew Unicode equivalents so
+# that words like ב"ר (ASCII ") are stored identically
+# to ב״ר (gershayim U+05F4), matching what spell_service.py
+# already does before Hunspell lookups.
+_QUOTE_NORM = str.maketrans({'"': '״', "'": '׳'})
+
+
+def _normalize_quotes(word: str) -> str:
+    return word.translate(_QUOTE_NORM)
+
 
 class DictionaryService:
     def __init__(
@@ -119,7 +129,7 @@ class DictionaryService:
             )
 
     def _normalise(self, word: str) -> str:
-        return word.strip().lower()
+        return _normalize_quotes(word.strip()).lower()
 
     # ------------------------------------------------------------------
     # Public API
@@ -136,7 +146,7 @@ class DictionaryService:
         Returns True if added, False if already present.
         Raises ValueError for invalid input.
         """
-        word = word.strip()
+        word = _normalize_quotes(word.strip())
         if not word:
             raise ValueError("Word must not be empty")
         if len(word) > 200:
@@ -158,7 +168,7 @@ class DictionaryService:
 
     def remove(self, word: str) -> bool:
         """Remove a word from the dictionary. Returns True if it was present."""
-        word = word.strip()
+        word = _normalize_quotes(word.strip())
         if self._collection is None:
             raise RuntimeError("Custom dictionary store is unavailable")
         result = self._collection.delete_one({"word_lower": word.lower()})
