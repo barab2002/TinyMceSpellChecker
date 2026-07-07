@@ -185,10 +185,27 @@ class DictionaryService:
     def search(
         self, query: Optional[str] = None, limit: int = 50, offset: int = 0
     ) -> tuple[List[str], int]:
-        """Case-insensitive substring search over the in-memory cache, paginated.
+        """Case-insensitive substring search, always reading from MongoDB.
 
+        Falls back to the in-memory cache only when the DB is unavailable.
         Returns (page_of_words, total_matching_words).
         """
+        if self._collection is not None:
+            try:
+                mongo_filter: dict = {}
+                if query:
+                    mongo_filter = {"word_lower": {"$regex": re.escape(query.strip().lower())}}
+                total = self._collection.count_documents(mongo_filter)
+                cursor = (
+                    self._collection.find(mongo_filter, {"word": 1, "_id": 0})
+                    .sort("word_lower", 1)
+                    .skip(offset)
+                    .limit(limit)
+                )
+                return [doc["word"] for doc in cursor], total
+            except PyMongoError as exc:
+                logger.error("Dictionary search DB error, falling back to cache: %s", exc)
+        # Fallback: in-memory cache
         words = sorted(self._words, key=str.lower)
         if query:
             q = query.strip().lower()
