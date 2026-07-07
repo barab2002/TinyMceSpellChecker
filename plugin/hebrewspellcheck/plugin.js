@@ -602,11 +602,13 @@ if (typeof AbortSignal.timeout !== 'function') {
           items: [
             { type: 'input', name: 'search', label: 'חיפוש', placeholder: 'הקלד לסינון...' },
             { type: 'htmlpanel', html: this._renderListHtml() },
+            { type: 'input', name: 'deleteWord', label: 'מחיקת מילה ישירה', placeholder: 'הקלד מילה למחיקה...' },
           ],
         },
-        initialData: { search: this._query },
+        initialData: { search: this._query, deleteWord: '' },
         buttons: [
           { type: 'custom', name: 'loadMore', text: 'טען עוד', disabled: this._words.length >= this._total },
+          { type: 'custom', name: 'deleteWord', text: 'מחק מילה' },
           { type: 'cancel', text: 'סגור' },
         ],
         onChange: (api, details) => {
@@ -620,8 +622,14 @@ if (typeof AbortSignal.timeout !== 'function') {
             this._fetch(true);
           }, DICT_SEARCH_DEBOUNCE_MS);
         },
-        onAction: (_api, details) => {
-          if (details.name === 'loadMore') this._fetch(false);
+        onAction: (api, details) => {
+          if (details.name === 'loadMore') { this._fetch(false); return; }
+          if (details.name === 'deleteWord') {
+            const word = (api.getData().deleteWord || '').trim();
+            if (!word) return;
+            DictionaryManager.removeWord(word);
+            api.setData({ deleteWord: '' });
+          }
         },
         onClose: () => {
           clearTimeout(this._searchTimer);
